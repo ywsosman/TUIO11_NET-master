@@ -25,7 +25,9 @@ using System.Collections.Generic;
 using System.Collections;
 using System.Threading;
 using TUIO;
+using WMPLib;
 using System.IO;
+using System.Media;
 
 public class TuioDemo : Form, TuioListener
 {
@@ -56,6 +58,9 @@ public class TuioDemo : Form, TuioListener
     SolidBrush blbBrush = new SolidBrush(Color.FromArgb(64, 64, 64));
     Pen curPen = new Pen(new SolidBrush(Color.Blue), 1);
 
+    // Media player used to play fruit sounds
+    private WindowsMediaPlayer fruitPlayer;
+
     public TuioDemo(int port)
     {
 
@@ -78,6 +83,10 @@ public class TuioDemo : Form, TuioListener
         objectList = new Dictionary<long, TuioObject>(128);
         cursorList = new Dictionary<long, TuioCursor>(128);
         blobList = new Dictionary<long, TuioBlob>(128);
+
+        // Initialize media player for fruit sounds (MP3)
+        fruitPlayer = new WindowsMediaPlayer();
+        fruitPlayer.settings.autoStart = false;
 
         client = new TuioClient(port);
         client.addTuioListener(this);
@@ -149,6 +158,9 @@ public class TuioDemo : Form, TuioListener
             objectList.Add(o.SessionID, o);
         }
         if (verbose) Console.WriteLine("add obj " + o.SymbolID + " (" + o.SessionID + ") " + o.X + " " + o.Y + " " + o.Angle);
+
+        // Play sound once when a new object (fruit) appears
+        PlayFruitSound(o.SymbolID);
     }
 
     public void updateTuioObject(TuioObject o)
@@ -218,6 +230,59 @@ public class TuioDemo : Form, TuioListener
         Invalidate();
     }
 
+    /// <summary>
+    /// Plays the corresponding fruit sound (MP3) for a given symbol ID.
+    /// Expects files like "apple.mp3", "banana.mp3", etc. in the current directory.
+    /// </summary>
+    /// <param name="symbolId">The TUIO object SymbolID.</param>
+    private void PlayFruitSound(int symbolId)
+    {
+        string soundFile = null;
+
+        switch (symbolId)
+        {
+            case 0:
+                soundFile = "apple.mp3";
+                break;
+            case 1:
+                soundFile = "banana.mp3";
+                break;
+            case 2:
+                soundFile = "straw.mp3";
+                break;
+            case 3:
+                soundFile = "watermelon.mp3";
+                break;
+            case 4:
+                soundFile = "mango.mp3";
+                break;
+            case 5:
+                soundFile = "orange.mp3";
+                break;
+            case 6:
+                soundFile = "kiwi.mp3";
+                break;
+            default:
+                return; // no sound for other IDs
+        }
+
+        // Look for sounds inside an "assets" folder next to the project
+        string fullPath = Path.Combine(Environment.CurrentDirectory, "assets", soundFile);
+        if (!File.Exists(fullPath)) return;
+
+        try
+        {
+            // Stop any currently playing sound, set new file, and play
+            fruitPlayer.controls.stop();
+            fruitPlayer.URL = fullPath;
+            fruitPlayer.controls.play();
+        }
+        catch
+        {
+            // swallow exceptions – you can add logging here if needed
+        }
+    }
+
     protected override void OnPaintBackground(PaintEventArgs pevent)
     {
         // Getting the graphics object
@@ -274,40 +339,40 @@ public class TuioDemo : Form, TuioListener
                     {
                         case 0:
 
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "apple.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "Black.jpeg");
+                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "apple.jpeg");
+                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
                             break;
 
                         case 1:
 
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "banana.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "Black.jpeg");
+                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "banana.jpeg");
+                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
                             break;
 
                         case 2:
 
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "straw.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "Black.jpeg");
+                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "straw.jpeg");
+                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
                             break;
 
                         case 3:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "watermelon.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "Black.jpeg");
+                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "watermelon.jpeg");
+                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
                             break;
 
                         case 4:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "mango.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "Black.jpeg");
+                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "mango.jpeg");
+                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
                             break;
 
                         case 5:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "orange.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "Black.jpeg");
+                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "orange.jpeg");
+                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
                             break;
 
                         case 6:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "kiwi.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "Black.jpeg");
+                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "kiwi.jpeg");
+                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
                             break;
                     }
                     if (File.Exists(BackgroundImagePath))
