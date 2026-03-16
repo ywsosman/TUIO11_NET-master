@@ -20,46 +20,59 @@
 using System;
 using System.Drawing;
 using System.Windows.Forms;
-using System.ComponentModel;
 using System.Collections.Generic;
 using System.Collections;
 using System.Threading;
 using TUIO;
-using WMPLib;
 using System.IO;
-using System.Media;
 
 public class TuioDemo : Form, TuioListener
 {
     private TuioClient client;
-    private Dictionary<long, TuioObject> objectList;
-    private Dictionary<long, TuioCursor> cursorList;
-    private Dictionary<long, TuioBlob> blobList;
-    // Images declaration
-    string objectimagePath = string.Empty;
-    string BackgroundImagePath = string.Empty;
+    private readonly Dictionary<long, TuioObject> objectList;
+    private readonly Dictionary<long, TuioCursor> cursorList;
+    private readonly Dictionary<long, TuioBlob> blobList;
 
     public static int width, height;
-    private int window_width = 640;
-    private int window_height = 480;
+    private readonly int window_width = 640;
+    private readonly int window_height = 480;
     private int window_left = 0;
     private int window_top = 0;
-    private int screen_width = Screen.PrimaryScreen.Bounds.Width;
-    private int screen_height = Screen.PrimaryScreen.Bounds.Height;
+    private readonly int screen_width = Screen.PrimaryScreen.Bounds.Width;
+    private readonly int screen_height = Screen.PrimaryScreen.Bounds.Height;
 
     private bool fullscreen;
     private bool verbose;
 
-    Font font = new Font("Arial", 10.0f);
-    SolidBrush fntBrush = new SolidBrush(Color.White);
-    SolidBrush bgrBrush = new SolidBrush(Color.FromArgb(0, 0, 64));
-    SolidBrush curBrush = new SolidBrush(Color.FromArgb(192, 0, 192));
-    SolidBrush objBrush = new SolidBrush(Color.FromArgb(64, 0, 0));
-    SolidBrush blbBrush = new SolidBrush(Color.FromArgb(64, 64, 64));
-    Pen curPen = new Pen(new SolidBrush(Color.Blue), 1);
+    readonly Font font = new Font("Arial", 10.0f);
+    readonly SolidBrush fntBrush = new SolidBrush(Color.White);
+    readonly SolidBrush bgrBrush = new SolidBrush(Color.FromArgb(0, 0, 64));
+    readonly SolidBrush curBrush = new SolidBrush(Color.FromArgb(192, 0, 192));
+    readonly SolidBrush objBrush = new SolidBrush(Color.FromArgb(64, 0, 0));
+    readonly SolidBrush blbBrush = new SolidBrush(Color.FromArgb(64, 64, 64));
+    readonly Pen curPen = new Pen(new SolidBrush(Color.Blue), 1);
 
     // Media player used to play fruit sounds
-    private WindowsMediaPlayer fruitPlayer;
+    private dynamic fruitPlayer;
+
+    private string GetAssetsPath(string fileName)
+    {
+        // Try to find the file in the current directory
+        string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", fileName);
+        if (File.Exists(path)) return path;
+
+        // Try to find the file in the project root (going up from bin/Debug or bin/Release)
+        string rootPath = AppDomain.CurrentDomain.BaseDirectory;
+        for (int i = 0; i < 3; i++) // Try up to 3 levels up
+        {
+            rootPath = Path.GetDirectoryName(rootPath);
+            if (string.IsNullOrEmpty(rootPath)) break;
+            path = Path.Combine(rootPath, "Assets", fileName);
+            if (File.Exists(path)) return path;
+        }
+
+        return string.Empty; // Not found
+    }
 
     public TuioDemo(int port)
     {
@@ -68,13 +81,12 @@ public class TuioDemo : Form, TuioListener
         fullscreen = false;
         width = window_width;
         height = window_height;
-
-        this.ClientSize = new System.Drawing.Size(width, height);
+        this.ClientSize = new Size(width, height);
         this.Name = "TuioDemo";
         this.Text = "TuioDemo";
 
-        this.Closing += new CancelEventHandler(Form_Closing);
-        this.KeyDown += new KeyEventHandler(Form_KeyDown);
+        this.Closing += (sender, e) => Form_Closing(sender, e);
+        this.KeyDown += (sender, e) => Form_KeyDown(sender, e);
 
         this.SetStyle(ControlStyles.AllPaintingInWmPaint |
                         ControlStyles.UserPaint |
@@ -84,9 +96,16 @@ public class TuioDemo : Form, TuioListener
         cursorList = new Dictionary<long, TuioCursor>(128);
         blobList = new Dictionary<long, TuioBlob>(128);
 
-        // Initialize media player for fruit sounds (MP3)
-        fruitPlayer = new WindowsMediaPlayer();
-        fruitPlayer.settings.autoStart = false;
+        // Initialize media player for fruit sounds (MP3) using late binding to avoid WMPLib dependency
+        try {
+            Type wmpType = Type.GetTypeFromProgID("WMPlayer.OCX.7");
+            if (wmpType != null) {
+                fruitPlayer = Activator.CreateInstance(wmpType);
+                fruitPlayer.settings.autoStart = false;
+            }
+        } catch {
+            fruitPlayer = null;
+        }
 
         client = new TuioClient(port);
         client.addTuioListener(this);
@@ -237,7 +256,7 @@ public class TuioDemo : Form, TuioListener
     /// <param name="symbolId">The TUIO object SymbolID.</param>
     private void PlayFruitSound(int symbolId)
     {
-        string soundFile = null;
+        string soundFile;
 
         switch (symbolId)
         {
@@ -262,16 +281,27 @@ public class TuioDemo : Form, TuioListener
             case 6:
                 soundFile = "kiwi.mp3";
                 break;
+            case 7:
+                soundFile = "straw.mp3"; // Placeholder for 7
+                break;
             default:
                 return; // no sound for other IDs
         }
 
-        // Look for sounds inside an "assets" folder next to the project
-        string fullPath = Path.Combine(Environment.CurrentDirectory, "assets", soundFile);
-        if (!File.Exists(fullPath)) return;
+        // Look for sounds inside an "Assets" folder next to the project
+        string fullPath = GetAssetsPath(soundFile);
+        if (string.IsNullOrEmpty(fullPath)) {
+            Console.WriteLine("Sound file not found: " + soundFile);
+            return;
+        }
+        if (fruitPlayer == null) {
+            Console.WriteLine("fruitPlayer is null");
+            return;
+        }
 
         try
         {
+            Console.WriteLine("Playing sound: " + fullPath);
             // Stop any currently playing sound, set new file, and play
             fruitPlayer.controls.stop();
             fruitPlayer.URL = fullPath;
@@ -284,10 +314,20 @@ public class TuioDemo : Form, TuioListener
     }
 
     protected override void OnPaintBackground(PaintEventArgs pevent)
-    {
+    {System.Console.WriteLine("Repainting background...");
         // Getting the graphics object
         Graphics g = pevent.Graphics;
         g.FillRectangle(bgrBrush, new Rectangle(0, 0, width, height));
+
+        // Draw global background image (Black.jpeg) if it exists
+        string globalBgPath = GetAssetsPath("Black.jpeg");
+        if (File.Exists(globalBgPath))
+        {System.Console.WriteLine("Drawing background: " + globalBgPath);
+            using (Image bgImage = Image.FromFile(globalBgPath))
+            {
+                g.DrawImage(bgImage, new Rectangle(0, 0, width, height));
+            }
+        }
 
         // draw the cursor path
         if (cursorList.Count > 0)
@@ -335,59 +375,36 @@ public class TuioDemo : Form, TuioListener
                     g.DrawString(tobj.SymbolID + "", font, fntBrush, new PointF(ox - 10, oy - 10));
 
 
+                    string imageName;
                     switch (tobj.SymbolID)
                     {
-                        case 0:
-
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "apple.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
-                            break;
-
-                        case 1:
-
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "banana.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
-                            break;
-
-                        case 2:
-
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "straw.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
-                            break;
-
-                        case 3:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "watermelon.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
-                            break;
-
-                        case 4:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "mango.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
-                            break;
-
-                        case 5:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "orange.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
-                            break;
-
-                        case 6:
-                            objectimagePath = Path.Combine(Environment.CurrentDirectory, "assets", "kiwi.jpeg");
-                            BackgroundImagePath = Path.Combine(Environment.CurrentDirectory, "assets", "Black.jpeg");
-                            break;
+                        case 0: imageName = "apple.jpeg"; break;
+                        case 1: imageName = "banana.jpeg"; break;
+                        case 2: imageName = "straw.jpeg"; break;
+                        case 3: imageName = "watermelon.jpeg"; break;
+                        case 4: imageName = "mango.jpeg"; break;
+                        case 5: imageName = "Orange.jpeg"; break;
+                        case 6: imageName = "kiwi.jpeg"; break;
+                        case 7: imageName = "straw.jpeg"; break;
+                        default: imageName = string.Empty; break;
                     }
-                    if (File.Exists(BackgroundImagePath))
+
+                    if (!string.IsNullOrEmpty(imageName))
                     {
-                        Image bgImage = Image.FromFile(BackgroundImagePath);
-                        g.DrawImage(bgImage, new Rectangle(0, 0, width, height));
+                        string objPath = GetAssetsPath(imageName);
+                        if (File.Exists(objPath))
+                        {
+                            using (Image objImage = Image.FromFile(objPath))
+                            {
+                                int imageSize = height / 5;
+                                g.DrawImage(objImage, new Rectangle(ox - imageSize / 2, oy - imageSize / 2, imageSize, imageSize));
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine("Object image not found: " + imageName);
+                        }
                     }
-
-                    if (File.Exists(objectimagePath))
-                    {
-                        Image objImage = Image.FromFile(objectimagePath);
-                        size = height / 5;
-                        g.DrawImage(objImage, new Rectangle(ox - size / 2, oy - size / 2, size, size));
-                    }
-
                 }
             }
         }
@@ -438,7 +455,10 @@ public class TuioDemo : Form, TuioListener
                 break;
         }
 
-        TuioDemo app = new TuioDemo(port);
-        Application.Run(app);
+        LoginForm login = new LoginForm(port);
+        if (login.ShowDialog() == DialogResult.OK)
+        {
+            Application.Run(new TuioDemo(port));
+        }
     }
 }
