@@ -46,7 +46,7 @@ public class TuioDemo : Form, TuioListener
 
     readonly Font font = new Font("Arial", 10.0f);
     readonly SolidBrush fntBrush = new SolidBrush(Color.White);
-    readonly SolidBrush bgrBrush = new SolidBrush(Color.FromArgb(0, 0, 64));
+    readonly SolidBrush bgrBrush = new SolidBrush(Color.White);
     readonly SolidBrush curBrush = new SolidBrush(Color.FromArgb(192, 0, 192));
     readonly SolidBrush objBrush = new SolidBrush(Color.FromArgb(64, 0, 0));
     readonly SolidBrush blbBrush = new SolidBrush(Color.FromArgb(64, 64, 64));
@@ -54,6 +54,65 @@ public class TuioDemo : Form, TuioListener
 
     // Media player used to play fruit sounds
     private dynamic fruitPlayer;
+    private Image backgroundImage;
+    private List<Image> fruitImages = new List<Image>(); 
+    private List<Image> fruitImagesAlt = new List<Image>(); 
+
+    private Image LoadFruitImage(string baseName)
+    {
+        if (string.IsNullOrEmpty(baseName)) return null;
+
+        string p1 = GetAssetsPath(baseName);
+        if (File.Exists(p1)) return Image.FromFile(p1);
+
+        string[] exts = { ".png", ".jpg", ".jpeg" };
+        foreach (var ext in exts)
+        {
+            string p2 = GetAssetsPath(baseName + ext);
+            if (File.Exists(p2)) return Image.FromFile(p2);
+        }
+        return null;
+    }
+
+    private void LoadAssets()
+    {
+        string bgPath = GetAssetsPath("background.jpg");
+        if (File.Exists(bgPath)) backgroundImage = Image.FromFile(bgPath);
+
+        for (int i = 0; i <= 7; i++)
+        {
+            string name1 = string.Empty;
+            string name2 = string.Empty;
+            switch (i)
+            {
+                case 0: name1 = "apple"; name2 = "applecut"; break;
+                case 1: name1 = "banana"; name2 = "bananacut"; break;
+                case 2: name1 = "straw"; name2 = "strawcut"; break;
+                case 3: name1 = "watermelonwhole"; name2 = "watermelon"; break;
+                case 4: name1 = "mango"; name2 = "mangocut"; break;
+                case 5: name1 = "Orange"; name2 = "Orange"; break;
+                case 6: name1 = "wholekiwi"; name2 = "kiwi"; break;
+                case 7: name1 = "straw"; name2 = "strawcut"; break;
+            }
+
+            Image primary = LoadFruitImage(name1);
+            Image alternate = LoadFruitImage(name2);
+
+          
+            if (primary == null)
+            {
+                if (i == 3) primary = LoadFruitImage("watermelon");
+                if (i == 6) primary = LoadFruitImage("kiwi");
+            }
+            if (alternate == null)
+            {
+                alternate = primary; // Default to primary if alternate image doesn't exist
+            }
+
+            fruitImages.Add(primary);
+            fruitImagesAlt.Add(alternate);
+        }
+    }
 
     private string GetAssetsPath(string fileName)
     {
@@ -106,6 +165,8 @@ public class TuioDemo : Form, TuioListener
         } catch {
             fruitPlayer = null;
         }
+
+        LoadAssets(); // Cache images for fast and responsive rendering
 
         client = new TuioClient(port);
         client.addTuioListener(this);
@@ -314,19 +375,30 @@ public class TuioDemo : Form, TuioListener
     }
 
     protected override void OnPaintBackground(PaintEventArgs pevent)
-    {System.Console.WriteLine("Repainting background...");
+    {
         // Getting the graphics object
         Graphics g = pevent.Graphics;
         g.FillRectangle(bgrBrush, new Rectangle(0, 0, width, height));
 
         // Draw global background image (Black.jpeg) if it exists
-        string globalBgPath = GetAssetsPath("Black.jpeg");
-        if (File.Exists(globalBgPath))
-        {System.Console.WriteLine("Drawing background: " + globalBgPath);
-            using (Image bgImage = Image.FromFile(globalBgPath))
-            {
-                g.DrawImage(bgImage, new Rectangle(0, 0, width, height));
-            }
+        if (backgroundImage != null)
+        {
+            g.DrawImage(backgroundImage, new Rectangle(0, 0, width, height));
+        }
+
+        // --- INTERACTIVE UI ELEMENTS ---
+        if (objectList.Count == 0)
+        {
+            string prompt = "Hold a fruit!";
+            Font titleFont = new Font("Arial", 28.0f, FontStyle.Bold);
+            SizeF textSize = g.MeasureString(prompt, titleFont);
+
+            // Draw a translucent box behind the text
+            g.FillRectangle(new SolidBrush(Color.FromArgb(150, 0, 0, 0)), 
+                (width - textSize.Width) / 2 - 20, (height - textSize.Height) / 2 - 10, 
+                textSize.Width + 40, textSize.Height + 20);
+
+            g.DrawString(prompt, titleFont, Brushes.Yellow, new PointF((width - textSize.Width) / 2, (height - textSize.Height) / 2));
         }
 
         // draw the cursor path
@@ -374,35 +446,49 @@ public class TuioDemo : Form, TuioListener
 
                     g.DrawString(tobj.SymbolID + "", font, fntBrush, new PointF(ox - 10, oy - 10));
 
-
-                    string imageName;
-                    switch (tobj.SymbolID)
+                    // Determine if the marker is rotated approximately 90 or 270 degrees
+                    // Cosine of 90/270 degrees is 0. If it falls below ~0.707 (45 degrees), we treat it as rotated.
+                    bool isRotated90 = Math.Abs(Math.Cos(tobj.Angle)) < 0.707;
+                    Image imgToDraw = null;
+                    if (tobj.SymbolID >= 0 && tobj.SymbolID < fruitImages.Count)
                     {
-                        case 0: imageName = "apple.jpeg"; break;
-                        case 1: imageName = "banana.jpeg"; break;
-                        case 2: imageName = "straw.jpeg"; break;
-                        case 3: imageName = "watermelon.jpeg"; break;
-                        case 4: imageName = "mango.jpeg"; break;
-                        case 5: imageName = "Orange.jpeg"; break;
-                        case 6: imageName = "kiwi.jpeg"; break;
-                        case 7: imageName = "straw.jpeg"; break;
-                        default: imageName = string.Empty; break;
+                        imgToDraw = isRotated90 ? fruitImagesAlt[(int)tobj.SymbolID] : fruitImages[(int)tobj.SymbolID];
                     }
 
-                    if (!string.IsNullOrEmpty(imageName))
+                    // Interactive image rendering without using a dictionary lookup
+                    if (imgToDraw != null)
                     {
-                        string objPath = GetAssetsPath(imageName);
-                        if (File.Exists(objPath))
+                        int imageSize = height / 3; // Make images larger and more visible
+
+                        // Draw a nice highlight frame behind the fruit
+                        g.FillEllipse(new SolidBrush(Color.FromArgb(120, 255, 255, 255)), ox - imageSize / 2 - 15, oy - imageSize / 2 - 15, imageSize + 30, imageSize + 30);
+                        g.DrawEllipse(new Pen(Color.LimeGreen, 4), ox - imageSize / 2 - 15, oy - imageSize / 2 - 15, imageSize + 30, imageSize + 30);
+
+                        // Draw the cached image
+                        g.DrawImage(imgToDraw, new Rectangle(ox - imageSize / 2, oy - imageSize / 2, imageSize, imageSize));
+
+                        // Get the name of the fruit using a switch statement instead of dictionary
+                        string fName = string.Empty;
+                        switch (tobj.SymbolID)
                         {
-                            using (Image objImage = Image.FromFile(objPath))
-                            {
-                                int imageSize = height / 5;
-                                g.DrawImage(objImage, new Rectangle(ox - imageSize / 2, oy - imageSize / 2, imageSize, imageSize));
-                            }
+                            case 0: fName = "Apple"; break;
+                            case 1: fName = "Banana"; break;
+                            case 2: fName = "Strawberry"; break;
+                            case 3: fName = "Watermelon"; break;
+                            case 4: fName = "Mango"; break;
+                            case 5: fName = "Orange"; break;
+                            case 6: fName = "Kiwi"; break;
+                            case 7: fName = "Strawberry"; break;
                         }
-                        else
+
+                        if (!string.IsNullOrEmpty(fName))
                         {
-                            Console.WriteLine("Object image not found: " + imageName);
+                            Font fruitFont = new Font("Arial", 20.0f, FontStyle.Bold);
+                            SizeF nameSize = g.MeasureString(fName, fruitFont);
+
+                            // Draw nice background for text
+                            g.FillRectangle(new SolidBrush(Color.FromArgb(180, 0, 0, 0)), ox - nameSize.Width / 2 - 10, oy + imageSize / 2 + 10, nameSize.Width + 20, nameSize.Height + 10);
+                            g.DrawString(fName, fruitFont, Brushes.LightGreen, new PointF(ox - nameSize.Width / 2, oy + imageSize / 2 + 15));
                         }
                     }
                 }
