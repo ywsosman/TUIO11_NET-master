@@ -310,11 +310,7 @@ public class TuioDemo : Form, TuioListener
         Invalidate();
     }
 
-    /// <summary>
-    /// Plays the corresponding fruit sound (MP3) for a given symbol ID.
-    /// Expects files like "apple.mp3", "banana.mp3", etc. in the current directory.
-    /// </summary>
-    /// <param name="symbolId">The TUIO object SymbolID.</param>
+ 
     private void PlayFruitSound(int symbolId)
     {
         string soundFile;
@@ -452,7 +448,14 @@ public class TuioDemo : Form, TuioListener
                     Image imgToDraw = null;
                     if (tobj.SymbolID >= 0 && tobj.SymbolID < fruitImages.Count)
                     {
-                        imgToDraw = isRotated90 ? fruitImagesAlt[(int)tobj.SymbolID] : fruitImages[(int)tobj.SymbolID];
+                        if (isRotated90)
+                        {
+                            imgToDraw = fruitImagesAlt[(int)tobj.SymbolID];
+                        }
+                        else
+                        {
+                            imgToDraw = fruitImages[(int)tobj.SymbolID];
+                        }
                     }
 
                     // Interactive image rendering without using a dictionary lookup
@@ -467,7 +470,7 @@ public class TuioDemo : Form, TuioListener
                         // Draw the cached image
                         g.DrawImage(imgToDraw, new Rectangle(ox - imageSize / 2, oy - imageSize / 2, imageSize, imageSize));
 
-                        // Get the name of the fruit using a switch statement instead of dictionary
+                       
                         string fName = string.Empty;
                         switch (tobj.SymbolID)
                         {
@@ -521,6 +524,24 @@ public class TuioDemo : Form, TuioListener
                 }
             }
         }
+    }
+
+    private void InitializeComponent()
+    {
+            this.SuspendLayout();
+            // 
+            // TuioDemo
+            // 
+            this.ClientSize = new System.Drawing.Size(284, 261);
+            this.Name = "TuioDemo";
+            this.Load += new System.EventHandler(this.TuioDemo_Load);
+            this.ResumeLayout(false);
+
+    }
+
+    private void TuioDemo_Load(object sender, EventArgs e)
+    {
+
     }
 
     public static void Main(String[] argv)
