@@ -157,12 +157,25 @@ def create_gesture_templates():
     push = resample_points([(0.3, 0.5), (0.5, 0.5), (0.7, 0.5)], NUM_GESTURE_POINTS)
     swipe_l = resample_points([(0.8, 0.5), (0.2, 0.5)], NUM_GESTURE_POINTS)
     swipe_r = resample_points([(0.2, 0.5), (0.8, 0.5)], NUM_GESTURE_POINTS)
+    # HCI radial menu: synthetic strokes — tune or re-record for reliable recognition.
+    pointer_up = resample_points([(0.5, 0.72), (0.5, 0.55), (0.5, 0.38), (0.5, 0.22)], NUM_GESTURE_POINTS)
+    open_hand = resample_points(
+        [(0.18, 0.52), (0.35, 0.35), (0.5, 0.5), (0.65, 0.35), (0.82, 0.52)],
+        NUM_GESTURE_POINTS,
+    )
+    fist = resample_points(
+        [(0.48, 0.48), (0.55, 0.48), (0.55, 0.55), (0.48, 0.55), (0.48, 0.48)],
+        NUM_GESTURE_POINTS,
+    )
     return [
         Template("wave", [Point(p[0], p[1], 1) for p in wave]),
         Template("circle", [Point(p[0], p[1], 1) for p in circle]),
         Template("push", [Point(p[0], p[1], 1) for p in push]),
         Template("swipe_left", [Point(p[0], p[1], 1) for p in swipe_l]),
         Template("swipe_right", [Point(p[0], p[1], 1) for p in swipe_r]),
+        Template("pointer_up", [Point(p[0], p[1], 1) for p in pointer_up]),
+        Template("open_hand", [Point(p[0], p[1], 1) for p in open_hand]),
+        Template("fist", [Point(p[0], p[1], 1) for p in fist]),
     ]
 
 
