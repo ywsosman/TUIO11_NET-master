@@ -1,128 +1,258 @@
-/*
-	TUIO C# Demo - part of the reacTIVision project
-	Copyright (c) 2005-2016 Martin Kaltenbrunner <martin@tuio.org>
-
-	This program is free software; you can redistribute it and/or modify
-	it under the terms of the GNU General Public License as published by
-	the Free Software Foundation; either version 2 of the License, or
-	(at your option) any later version.
-
-	This program is distributed in the hope that it will be useful,
-	but WITHOUT ANY WARRANTY; without even the implied warranty of
-	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-	GNU General Public License for more details.
-
-	You should have received a copy of the GNU General Public License
-	along with this program; if not, write to the Free Software
-	Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
-*/
-
 using System;
-using System.Drawing;
-using System.Windows.Forms;
 using System.Collections.Generic;
-using System.Collections;
-using System.Threading;
-using TUIO;
+using System.Drawing;
 using System.IO;
+using System.Linq;
+using System.Windows.Forms;
+using TUIO;
 
 public class TuioDemo : Form, TuioListener
 {
+    private class TargetSlot
+    {
+        public int SymbolId;
+        public string FruitName;
+        public float XNormalized;
+        public float YNormalized;
+        public float WidthNormalized;
+        public float HeightNormalized;
+        public bool IsPlaced;
+    }
+
+    private class LevelDefinition
+    {
+        public string Name;
+        public string BoardImageName;
+        public List<TargetSlot> Targets = new List<TargetSlot>();
+    }
+
     private TuioClient client;
-    private readonly Dictionary<long, TuioObject> objectList;
-    private readonly Dictionary<long, TuioCursor> cursorList;
-    private readonly Dictionary<long, TuioBlob> blobList;
+    private readonly Dictionary<long, TuioObject> objectList = new Dictionary<long, TuioObject>(128);
+    private readonly Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
+    private readonly Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(128);
+    private readonly Dictionary<int, Image> fruitImages = new Dictionary<int, Image>();
+    private readonly Dictionary<int, Image> fruitImagesAlt = new Dictionary<int, Image>();
+    private readonly Dictionary<string, Image> boardImages = new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
+    private readonly List<LevelDefinition> levels = new List<LevelDefinition>();
+    private readonly List<int> levelScores = new List<int>();
 
     public static int width, height;
-    private readonly int window_width = 640;
-    private readonly int window_height = 480;
-    private int window_left = 0;
-    private int window_top = 0;
-    private readonly int screen_width = Screen.PrimaryScreen.Bounds.Width;
-    private readonly int screen_height = Screen.PrimaryScreen.Bounds.Height;
+    private readonly int windowWidth = 1280;
+    private readonly int windowHeight = 720;
+    private int windowLeft;
+    private int windowTop;
+    private readonly int screenWidth = Screen.PrimaryScreen.Bounds.Width;
+    private readonly int screenHeight = Screen.PrimaryScreen.Bounds.Height;
 
     private bool fullscreen;
     private bool verbose;
-
-    readonly Font font = new Font("Arial", 10.0f);
-    readonly SolidBrush fntBrush = new SolidBrush(Color.White);
-    readonly SolidBrush bgrBrush = new SolidBrush(Color.White);
-    readonly SolidBrush curBrush = new SolidBrush(Color.FromArgb(192, 0, 192));
-    readonly SolidBrush objBrush = new SolidBrush(Color.FromArgb(64, 0, 0));
-    readonly SolidBrush blbBrush = new SolidBrush(Color.FromArgb(64, 64, 64));
-    readonly Pen curPen = new Pen(new SolidBrush(Color.Blue), 1);
-
-    // Media player used to play fruit sounds
+    private bool pendingLevelComplete;
+    private int currentLevelIndex;
+    private DateTime levelStartTime;
+    private Image fallbackBackground;
     private dynamic fruitPlayer;
-    private Image backgroundImage;
-    private List<Image> fruitImages = new List<Image>(); 
-    private List<Image> fruitImagesAlt = new List<Image>(); 
 
-    private Image LoadFruitImage(string baseName)
+    private readonly Font smallFont = new Font("Arial", 12.0f, FontStyle.Bold);
+    private readonly Font titleFont = new Font("Arial", 22.0f, FontStyle.Bold);
+    private readonly SolidBrush whiteBrush = new SolidBrush(Color.White);
+    private readonly SolidBrush darkOverlayBrush = new SolidBrush(Color.FromArgb(140, 0, 0, 0));
+
+    public TuioDemo(int port)
     {
-        if (string.IsNullOrEmpty(baseName)) return null;
+        verbose = false;
+        fullscreen = false;
+        width = windowWidth;
+        height = windowHeight;
+        ClientSize = new Size(width, height);
+        Name = "TuioDemo";
+        Text = "Fruit Learning Game";
 
-        string p1 = GetAssetsPath(baseName);
-        if (File.Exists(p1)) return Image.FromFile(p1);
+        Closing += Form_Closing;
+        KeyDown += Form_KeyDown;
+        SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
 
-        string[] exts = { ".png", ".jpg", ".jpeg" };
-        foreach (var ext in exts)
+        try
         {
-            string p2 = GetAssetsPath(baseName + ext);
-            if (File.Exists(p2)) return Image.FromFile(p2);
+            Type wmpType = Type.GetTypeFromProgID("WMPlayer.OCX.7");
+            if (wmpType != null)
+            {
+                fruitPlayer = Activator.CreateInstance(wmpType);
+                fruitPlayer.settings.autoStart = false;
+            }
         }
-        return null;
+        catch
+        {
+            fruitPlayer = null;
+        }
+
+        LoadAssets();
+        BuildLevels();
+        StartLevel(0);
+
+        client = new TuioClient(port);
+        client.addTuioListener(this);
+        client.connect();
+    }
+
+    private void BuildLevels()
+    {
+        levels.Clear();
+
+        var level1 = new LevelDefinition
+        {
+            Name = "Level 1",
+            BoardImageName = "level 1.png"
+        };
+
+        level1.Targets.Add(new TargetSlot { SymbolId = 0, FruitName = "Apple", XNormalized = 0.23f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
+        level1.Targets.Add(new TargetSlot { SymbolId = 1, FruitName = "Banana", XNormalized = 0.75f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
+
+        var level2 = new LevelDefinition
+        {
+            Name = "Level 2",
+            BoardImageName = "level2.png"
+        };
+        level2.Targets.Add(new TargetSlot { SymbolId = 2, FruitName = "Strawberry", XNormalized = 0.11f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 3, FruitName = "Watermelon", XNormalized = 0.30f, YNormalized = 0.50f, WidthNormalized = 0.15f, HeightNormalized = 0.21f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 4, FruitName = "Mango", XNormalized = 0.50f, YNormalized = 0.45f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 5, FruitName = "Orange", XNormalized = 0.69f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 6, FruitName = "Kiwi", XNormalized = 0.88f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
+
+        levels.Add(level1);
+        levels.Add(level2);
+    }
+
+    private LevelDefinition CurrentLevel
+    {
+        get
+        {
+            if (currentLevelIndex >= 0 && currentLevelIndex < levels.Count)
+                return levels[currentLevelIndex];
+            return null;
+        }
+    }
+
+    private void StartLevel(int levelIndex)
+    {
+        if (levelIndex < 0 || levelIndex >= levels.Count) return;
+
+        currentLevelIndex = levelIndex;
+        pendingLevelComplete = false;
+        foreach (var slot in CurrentLevel.Targets)
+        {
+            slot.IsPlaced = false;
+        }
+
+        levelStartTime = DateTime.Now;
     }
 
     private void LoadAssets()
     {
-        string bgPath = GetAssetsPath("background.jpg");
-        if (File.Exists(bgPath)) backgroundImage = Image.FromFile(bgPath);
+        fallbackBackground = LoadImageByBaseName("background");
 
-        for (int i = 0; i <= 7; i++)
+        fruitImages[0] = LoadImageByBaseName("apple");
         {
-            string name1 = string.Empty;
-            string name2 = string.Empty;
-            switch (i)
-            {
-                case 0: name1 = "apple"; name2 = "applecut"; break;
-                case 1: name1 = "banana"; name2 = "bananacut"; break;
-                case 2: name1 = "straw"; name2 = "strawcut"; break;
-                case 3: name1 = "watermelonwhole"; name2 = "watermelon"; break;
-                case 4: name1 = "mango"; name2 = "mangocut"; break;
-                case 5: name1 = "Orange"; name2 = "Orange"; break;
-                case 6: name1 = "wholekiwi"; name2 = "kiwi"; break;
-                case 7: name1 = "straw"; name2 = "strawcut"; break;
-            }
-
-            Image primary = LoadFruitImage(name1);
-            Image alternate = LoadFruitImage(name2);
-
-          
-            if (primary == null)
-            {
-                if (i == 3) primary = LoadFruitImage("watermelon");
-                if (i == 6) primary = LoadFruitImage("kiwi");
-            }
-            if (alternate == null)
-            {
-                alternate = primary; // Default to primary if alternate image doesn't exist
-            }
-
-            fruitImages.Add(primary);
-            fruitImagesAlt.Add(alternate);
+            var tmp = LoadImageByBaseName("applecut");
+            if (tmp != null)
+                fruitImagesAlt[0] = tmp;
+            else
+                fruitImagesAlt[0] = fruitImages[0];
         }
+        fruitImages[1] = LoadImageByBaseName("banana");
+        {
+            var tmp = LoadImageByBaseName("bananacut");
+            if (tmp != null)
+                fruitImagesAlt[1] = tmp;
+            else
+                fruitImagesAlt[1] = fruitImages[1];
+        }
+        fruitImages[2] = LoadImageByBaseName("straw");
+        {
+            var tmp = LoadImageByBaseName("strawcut");
+            if (tmp != null)
+                fruitImagesAlt[2] = tmp;
+            else
+                fruitImagesAlt[2] = fruitImages[2];
+        }
+        {
+            var tmp = LoadImageByBaseName("watermelonwhole");
+            if (tmp != null)
+                fruitImages[3] = tmp;
+            else
+                fruitImages[3] = LoadImageByBaseName("watermelon");
+        }
+        {
+            var tmp = LoadImageByBaseName("watermelon");
+            if (tmp != null)
+                fruitImagesAlt[3] = tmp;
+            else
+                fruitImagesAlt[3] = fruitImages[3];
+        }
+        fruitImages[4] = LoadImageByBaseName("mango");
+        {
+            var tmp = LoadImageByBaseName("mangocut");
+            if (tmp != null)
+                fruitImagesAlt[4] = tmp;
+            else
+                fruitImagesAlt[4] = fruitImages[4];
+        }
+        fruitImages[5] = LoadImageByBaseName("Orange");
+        fruitImagesAlt[5] = fruitImages[5];
+        {
+            var tmp = LoadImageByBaseName("wholekiwi");
+            if (tmp != null)
+                fruitImages[6] = tmp;
+            else
+                fruitImages[6] = LoadImageByBaseName("kiwi");
+        }
+        {
+            var tmp = LoadImageByBaseName("kiwi");
+            if (tmp != null)
+                fruitImagesAlt[6] = tmp;
+            else
+                fruitImagesAlt[6] = fruitImages[6];
+        }
+
+        var level1Board = LoadImageByExactName("level 1.png");
+        if (level1Board == null)
+            level1Board = LoadImageByExactName("level1.png");
+        if (level1Board != null) boardImages["level 1.png"] = level1Board;
+
+        var level2Board = LoadImageByExactName("level2.png");
+        if (level2Board != null) boardImages["level2.png"] = level2Board;
+    }
+
+    private Image LoadImageByBaseName(string baseName)
+    {
+        if (string.IsNullOrEmpty(baseName)) return null;
+        string[] extensions = { ".png", ".jpg", ".jpeg" };
+        foreach (var ext in extensions)
+        {
+            var path = GetAssetsPath(baseName + ext);
+            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            {
+                return Image.FromFile(path);
+            }
+        }
+        return null;
+    }
+
+    private Image LoadImageByExactName(string fileName)
+    {
+        if (string.IsNullOrEmpty(fileName)) return null;
+        var path = GetAssetsPath(fileName);
+        if (!string.IsNullOrEmpty(path) && File.Exists(path))
+            return Image.FromFile(path);
+        return null;
     }
 
     private string GetAssetsPath(string fileName)
     {
-        // Try to find the file in the current directory
         string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Assets", fileName);
         if (File.Exists(path)) return path;
 
-        // Try to find the file in the project root (going up from bin/Debug or bin/Release)
         string rootPath = AppDomain.CurrentDomain.BaseDirectory;
-        for (int i = 0; i < 3; i++) // Try up to 3 levels up
+        for (int i = 0; i < 4; i++)
         {
             rootPath = Path.GetDirectoryName(rootPath);
             if (string.IsNullOrEmpty(rootPath)) break;
@@ -130,123 +260,73 @@ public class TuioDemo : Form, TuioListener
             if (File.Exists(path)) return path;
         }
 
-        return string.Empty; // Not found
+        return string.Empty;
     }
 
-    public TuioDemo(int port)
+    private void Form_KeyDown(object sender, KeyEventArgs e)
     {
-
-        verbose = false;
-        fullscreen = false;
-        width = window_width;
-        height = window_height;
-        this.ClientSize = new Size(width, height);
-        this.Name = "TuioDemo";
-        this.Text = "TuioDemo";
-
-        this.Closing += (sender, e) => Form_Closing(sender, e);
-        this.KeyDown += (sender, e) => Form_KeyDown(sender, e);
-
-        this.SetStyle(ControlStyles.AllPaintingInWmPaint |
-                        ControlStyles.UserPaint |
-                        ControlStyles.DoubleBuffer, true);
-
-        objectList = new Dictionary<long, TuioObject>(128);
-        cursorList = new Dictionary<long, TuioCursor>(128);
-        blobList = new Dictionary<long, TuioBlob>(128);
-
-        // Initialize media player for fruit sounds (MP3) using late binding to avoid WMPLib dependency
-        try {
-            Type wmpType = Type.GetTypeFromProgID("WMPlayer.OCX.7");
-            if (wmpType != null) {
-                fruitPlayer = Activator.CreateInstance(wmpType);
-                fruitPlayer.settings.autoStart = false;
-            }
-        } catch {
-            fruitPlayer = null;
-        }
-
-        LoadAssets(); // Cache images for fast and responsive rendering
-
-        client = new TuioClient(port);
-        client.addTuioListener(this);
-
-        client.connect();
-    }
-
-    private void Form_KeyDown(object sender, System.Windows.Forms.KeyEventArgs e)
-    {
-
         if (e.KeyData == Keys.F1)
         {
-            if (fullscreen == false)
+            if (!fullscreen)
             {
-
-                width = screen_width;
-                height = screen_height;
-
-                window_left = this.Left;
-                window_top = this.Top;
-
-                this.FormBorderStyle = FormBorderStyle.None;
-                this.Left = 0;
-                this.Top = 0;
-                this.Width = screen_width;
-                this.Height = screen_height;
-
+                width = screenWidth;
+                height = screenHeight;
+                windowLeft = Left;
+                windowTop = Top;
+                FormBorderStyle = FormBorderStyle.None;
+                Left = 0;
+                Top = 0;
+                Width = screenWidth;
+                Height = screenHeight;
                 fullscreen = true;
             }
             else
             {
-
-                width = window_width;
-                height = window_height;
-
-                this.FormBorderStyle = FormBorderStyle.Sizable;
-                this.Left = window_left;
-                this.Top = window_top;
-                this.Width = window_width;
-                this.Height = window_height;
-
+                width = windowWidth;
+                height = windowHeight;
+                FormBorderStyle = FormBorderStyle.Sizable;
+                Left = windowLeft;
+                Top = windowTop;
+                Width = windowWidth;
+                Height = windowHeight;
                 fullscreen = false;
             }
         }
         else if (e.KeyData == Keys.Escape)
         {
-            this.Close();
-
+            Close();
         }
         else if (e.KeyData == Keys.V)
         {
             verbose = !verbose;
         }
-
     }
 
     private void Form_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
-        client.removeTuioListener(this);
-
-        client.disconnect();
-        System.Environment.Exit(0);
+        if (client != null)
+        {
+            client.removeTuioListener(this);
+            client.disconnect();
+        }
+        Environment.Exit(0);
     }
 
     public void addTuioObject(TuioObject o)
     {
         lock (objectList)
         {
-            objectList.Add(o.SessionID, o);
+            objectList[o.SessionID] = o;
         }
-        if (verbose) Console.WriteLine("add obj " + o.SymbolID + " (" + o.SessionID + ") " + o.X + " " + o.Y + " " + o.Angle);
-
-        // Play sound once when a new object (fruit) appears
+        if (verbose) Console.WriteLine("add obj " + o.SymbolID + " (" + o.SessionID + ")");
         PlayFruitSound(o.SymbolID);
+        EvaluateObjectPlacement(o);
     }
 
     public void updateTuioObject(TuioObject o)
     {
-
-        if (verbose) Console.WriteLine("set obj " + o.SymbolID + " " + o.SessionID + " " + o.X + " " + o.Y + " " + o.Angle + " " + o.MotionSpeed + " " + o.RotationSpeed + " " + o.MotionAccel + " " + o.RotationAccel);
+        EvaluateObjectPlacement(o);
+        if (verbose) Console.WriteLine("set obj " + o.SymbolID + " (" + o.SessionID + ")");
     }
 
     public void removeTuioObject(TuioObject o)
@@ -260,49 +340,26 @@ public class TuioDemo : Form, TuioListener
 
     public void addTuioCursor(TuioCursor c)
     {
-        lock (cursorList)
-        {
-            cursorList.Add(c.SessionID, c);
-        }
-        if (verbose) Console.WriteLine("add cur " + c.CursorID + " (" + c.SessionID + ") " + c.X + " " + c.Y);
+        lock (cursorList) { cursorList[c.SessionID] = c; }
     }
 
-    public void updateTuioCursor(TuioCursor c)
-    {
-        if (verbose) Console.WriteLine("set cur " + c.CursorID + " (" + c.SessionID + ") " + c.X + " " + c.Y + " " + c.MotionSpeed + " " + c.MotionAccel);
-    }
+    public void updateTuioCursor(TuioCursor c) { }
 
     public void removeTuioCursor(TuioCursor c)
     {
-        lock (cursorList)
-        {
-            cursorList.Remove(c.SessionID);
-        }
-        if (verbose) Console.WriteLine("del cur " + c.CursorID + " (" + c.SessionID + ")");
+        lock (cursorList) { cursorList.Remove(c.SessionID); }
     }
 
     public void addTuioBlob(TuioBlob b)
     {
-        lock (blobList)
-        {
-            blobList.Add(b.SessionID, b);
-        }
-        if (verbose) Console.WriteLine("add blb " + b.BlobID + " (" + b.SessionID + ") " + b.X + " " + b.Y + " " + b.Angle + " " + b.Width + " " + b.Height + " " + b.Area);
+        lock (blobList) { blobList[b.SessionID] = b; }
     }
 
-    public void updateTuioBlob(TuioBlob b)
-    {
-
-        if (verbose) Console.WriteLine("set blb " + b.BlobID + " (" + b.SessionID + ") " + b.X + " " + b.Y + " " + b.Angle + " " + b.Width + " " + b.Height + " " + b.Area + " " + b.MotionSpeed + " " + b.RotationSpeed + " " + b.MotionAccel + " " + b.RotationAccel);
-    }
+    public void updateTuioBlob(TuioBlob b) { }
 
     public void removeTuioBlob(TuioBlob b)
     {
-        lock (blobList)
-        {
-            blobList.Remove(b.SessionID);
-        }
-        if (verbose) Console.WriteLine("del blb " + b.BlobID + " (" + b.SessionID + ")");
+        lock (blobList) { blobList.Remove(b.SessionID); }
     }
 
     public void refresh(TuioTime frameTime)
@@ -310,256 +367,306 @@ public class TuioDemo : Form, TuioListener
         Invalidate();
     }
 
- 
+    private void EvaluateObjectPlacement(TuioObject o)
+    {
+        var level = CurrentLevel;
+        if (level == null || pendingLevelComplete) return;
+
+        foreach (var slot in level.Targets)
+        {
+            if (slot.IsPlaced || slot.SymbolId != o.SymbolID) continue;
+
+            RectangleF slotRect = GetSlotBounds(slot);
+            PointF markerPoint = new PointF(o.getScreenX(width), o.getScreenY(height));
+
+            bool isRotated90 = Math.Abs(Math.Cos(o.Angle)) < 0.707;
+            if (slotRect.Contains(markerPoint) && IsValidPlacementState(o.SymbolID, isRotated90))
+            {
+                slot.IsPlaced = true;
+            }
+        }
+
+        if (level.Targets.All(t => t.IsPlaced))
+        {
+            pendingLevelComplete = true;
+            BeginInvoke((MethodInvoker)HandleLevelCompleted);
+        }
+    }
+
+    private void HandleLevelCompleted()
+    {
+        var elapsedSeconds = (DateTime.Now - levelStartTime).TotalSeconds;
+        int score = CalculateLearningRate(CurrentLevel.Targets.Count, elapsedSeconds);
+        levelScores.Add(score);
+
+        MessageBox.Show(
+            CurrentLevel.Name + " completed!\nTime: " + elapsedSeconds.ToString("0.0") + " sec\nLearning rate: " + score + "%",
+            "Great job",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+
+        int nextLevel = currentLevelIndex + 1;
+        if (nextLevel < levels.Count)
+        {
+            StartLevel(nextLevel);
+            return;
+        }
+
+        int average;
+        if (levelScores.Count == 0)
+            average = 0;
+        else
+            average = (int)Math.Round(levelScores.Average());
+        MessageBox.Show(
+            "All levels completed!\nAverage learning rate: " + average + "%\n\nGame will restart from Level 1.",
+            "Finished",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+
+        levelScores.Clear();
+        StartLevel(0);
+    }
+
+    private int CalculateLearningRate(int fruitCount, double elapsedSeconds)
+    {
+        double expectedSeconds = fruitCount * 10.0;
+        double safeElapsed = Math.Max(1.0, elapsedSeconds);
+        double percentage = (expectedSeconds / safeElapsed) * 100.0;
+        if (percentage > 100.0) percentage = 100.0;
+        if (percentage < 0.0) percentage = 0.0;
+        return (int)Math.Round(percentage);
+    }
+
     private void PlayFruitSound(int symbolId)
     {
         string soundFile;
-
         switch (symbolId)
         {
-            case 0:
-                soundFile = "apple.mp3";
-                break;
-            case 1:
-                soundFile = "banana.mp3";
-                break;
-            case 2:
-                soundFile = "straw.mp3";
-                break;
-            case 3:
-                soundFile = "watermelon.mp3";
-                break;
-            case 4:
-                soundFile = "mango.mp3";
-                break;
-            case 5:
-                soundFile = "orange.mp3";
-                break;
-            case 6:
-                soundFile = "kiwi.mp3";
-                break;
-            case 7:
-                soundFile = "straw.mp3"; // Placeholder for 7
-                break;
-            default:
-                return; // no sound for other IDs
+            case 0: soundFile = "apple.mp3"; break;
+            case 1: soundFile = "banana.mp3"; break;
+            case 2: soundFile = "straw.mp3"; break;
+            case 3: soundFile = "watermelon.mp3"; break;
+            case 4: soundFile = "mango.mp3"; break;
+            case 5: soundFile = "orange.mp3"; break;
+            case 6: soundFile = "kiwi.mp3"; break;
+            default: return;
         }
 
-        // Look for sounds inside an "Assets" folder next to the project
         string fullPath = GetAssetsPath(soundFile);
-        if (string.IsNullOrEmpty(fullPath)) {
-            Console.WriteLine("Sound file not found: " + soundFile);
-            return;
-        }
-        if (fruitPlayer == null) {
-            Console.WriteLine("fruitPlayer is null");
-            return;
-        }
+        if (string.IsNullOrEmpty(fullPath) || fruitPlayer == null) return;
 
         try
         {
-            Console.WriteLine("Playing sound: " + fullPath);
-            // Stop any currently playing sound, set new file, and play
             fruitPlayer.controls.stop();
             fruitPlayer.URL = fullPath;
             fruitPlayer.controls.play();
         }
         catch
         {
-            // swallow exceptions – you can add logging here if needed
         }
     }
 
     protected override void OnPaintBackground(PaintEventArgs pevent)
     {
-        // Getting the graphics object
         Graphics g = pevent.Graphics;
-        g.FillRectangle(bgrBrush, new Rectangle(0, 0, width, height));
+        g.Clear(Color.Black);
 
-        // Draw global background image (Black.jpeg) if it exists
-        if (backgroundImage != null)
+        Image board = null;
+        var level = CurrentLevel;
+        if (level != null && boardImages.ContainsKey(level.BoardImageName))
         {
-            g.DrawImage(backgroundImage, new Rectangle(0, 0, width, height));
+            board = boardImages[level.BoardImageName];
+        }
+        else
+        {
+            board = fallbackBackground;
         }
 
-        // --- INTERACTIVE UI ELEMENTS ---
-        if (objectList.Count == 0)
+        if (board != null)
         {
-            string prompt = "Hold a fruit!";
-            Font titleFont = new Font("Arial", 28.0f, FontStyle.Bold);
-            SizeF textSize = g.MeasureString(prompt, titleFont);
-
-            // Draw a translucent box behind the text
-            g.FillRectangle(new SolidBrush(Color.FromArgb(150, 0, 0, 0)), 
-                (width - textSize.Width) / 2 - 20, (height - textSize.Height) / 2 - 10, 
-                textSize.Width + 40, textSize.Height + 20);
-
-            g.DrawString(prompt, titleFont, Brushes.Yellow, new PointF((width - textSize.Width) / 2, (height - textSize.Height) / 2));
+            g.DrawImage(board, new Rectangle(0, 0, width, height));
+        }
+        else
+        {
+            g.FillRectangle(new SolidBrush(Color.FromArgb(240, 240, 40)), new Rectangle(0, 0, width, height));
         }
 
-        // draw the cursor path
-        if (cursorList.Count > 0)
+        DrawTargetZones(g);
+        DrawPlacedFruits(g);
+        DrawObjects(g);
+        DrawHud(g);
+    }
+
+    private void DrawTargetZones(Graphics g)
+    {
+        if (CurrentLevel == null) return;
+
+        foreach (var slot in CurrentLevel.Targets)
         {
-            lock (cursorList)
+            float tx = slot.XNormalized * width;
+            float ty = slot.YNormalized * height;
+            RectangleF slotRect = GetSlotBounds(slot);
+
+            Color ringColor;
+            if (slot.IsPlaced)
+                ringColor = Color.LimeGreen;
+            else
+                ringColor = Color.White;
+            using (var pen = new Pen(ringColor, 3))
             {
-                foreach (TuioCursor tcur in cursorList.Values)
-                {
-                    List<TuioPoint> path = tcur.Path;
-                    TuioPoint current_point = path[0];
-
-                    for (int i = 0; i < path.Count; i++)
-                    {
-                        TuioPoint next_point = path[i];
-                        g.DrawLine(curPen, current_point.getScreenX(width), current_point.getScreenY(height), next_point.getScreenX(width), next_point.getScreenY(height));
-                        current_point = next_point;
-                    }
-                    g.FillEllipse(curBrush, current_point.getScreenX(width) - height / 100, current_point.getScreenY(height) - height / 100, height / 50, height / 50);
-                    g.DrawString(tcur.CursorID + "", font, fntBrush, new PointF(tcur.getScreenX(width) - 10, tcur.getScreenY(height) - 10));
-                }
+                g.DrawRectangle(pen, slotRect.X, slotRect.Y, slotRect.Width, slotRect.Height);
             }
+
+            string checkSuffix;
+            if (slot.IsPlaced)
+                checkSuffix = " ✓";
+            else
+                checkSuffix = "";
+            string status = slot.FruitName + checkSuffix;
+            SizeF labelSize = g.MeasureString(status, smallFont);
+            g.FillRectangle(darkOverlayBrush, tx - labelSize.Width / 2 - 6, slotRect.Bottom + 4, labelSize.Width + 12, labelSize.Height + 4);
+            g.DrawString(status, smallFont, whiteBrush, tx - labelSize.Width / 2, slotRect.Bottom + 6);
         }
+    }
 
-        // draw the objects
-        if (objectList.Count > 0)
+    private void DrawPlacedFruits(Graphics g)
+    {
+        if (CurrentLevel == null) return;
+
+        foreach (var slot in CurrentLevel.Targets)
         {
-            lock (objectList)
+            if (!slot.IsPlaced) continue;
+            Image placedImage;
+            if (slot.SymbolId == 3 || slot.SymbolId == 6)
             {
-                foreach (TuioObject tobj in objectList.Values)
-                {
-                    int ox = tobj.getScreenX(width);
-                    int oy = tobj.getScreenY(height);
-                    int size = height / 10;
-
-                    g.TranslateTransform(ox, oy);
-                    g.RotateTransform((float)(tobj.Angle / Math.PI * 180.0f));
-                    g.TranslateTransform(-ox, -oy);
-
-                    g.FillRectangle(objBrush, new Rectangle(ox - size / 2, oy - size / 2, size, size));
-
-                    g.TranslateTransform(ox, oy);
-                    g.RotateTransform(-1 * (float)(tobj.Angle / Math.PI * 180.0f));
-                    g.TranslateTransform(-ox, -oy);
-
-                    g.DrawString(tobj.SymbolID + "", font, fntBrush, new PointF(ox - 10, oy - 10));
-
-                    // Determine if the marker is rotated approximately 90 or 270 degrees
-                    // Cosine of 90/270 degrees is 0. If it falls below ~0.707 (45 degrees), we treat it as rotated.
-                    bool isRotated90 = Math.Abs(Math.Cos(tobj.Angle)) < 0.707;
-                    Image imgToDraw = null;
-                    if (tobj.SymbolID >= 0 && tobj.SymbolID < fruitImages.Count)
-                    {
-                        if (isRotated90)
-                        {
-                            imgToDraw = fruitImagesAlt[(int)tobj.SymbolID];
-                        }
-                        else
-                        {
-                            imgToDraw = fruitImages[(int)tobj.SymbolID];
-                        }
-                    }
-
-                    // Interactive image rendering without using a dictionary lookup
-                    if (imgToDraw != null)
-                    {
-                        int imageSize = height / 3; // Make images larger and more visible
-
-                        // Draw a nice highlight frame behind the fruit
-                        g.FillEllipse(new SolidBrush(Color.FromArgb(120, 255, 255, 255)), ox - imageSize / 2 - 15, oy - imageSize / 2 - 15, imageSize + 30, imageSize + 30);
-                        g.DrawEllipse(new Pen(Color.LimeGreen, 4), ox - imageSize / 2 - 15, oy - imageSize / 2 - 15, imageSize + 30, imageSize + 30);
-
-                        // Draw the cached image
-                        g.DrawImage(imgToDraw, new Rectangle(ox - imageSize / 2, oy - imageSize / 2, imageSize, imageSize));
-
-                       
-                        string fName = string.Empty;
-                        switch (tobj.SymbolID)
-                        {
-                            case 0: fName = "Apple"; break;
-                            case 1: fName = "Banana"; break;
-                            case 2: fName = "Strawberry"; break;
-                            case 3: fName = "Watermelon"; break;
-                            case 4: fName = "Mango"; break;
-                            case 5: fName = "Orange"; break;
-                            case 6: fName = "Kiwi"; break;
-                            case 7: fName = "Strawberry"; break;
-                        }
-
-                        if (!string.IsNullOrEmpty(fName))
-                        {
-                            Font fruitFont = new Font("Arial", 20.0f, FontStyle.Bold);
-                            SizeF nameSize = g.MeasureString(fName, fruitFont);
-
-                            // Draw nice background for text
-                            g.FillRectangle(new SolidBrush(Color.FromArgb(180, 0, 0, 0)), ox - nameSize.Width / 2 - 10, oy + imageSize / 2 + 10, nameSize.Width + 20, nameSize.Height + 10);
-                            g.DrawString(fName, fruitFont, Brushes.LightGreen, new PointF(ox - nameSize.Width / 2, oy + imageSize / 2 + 15));
-                        }
-                    }
-                }
+                if (fruitImagesAlt.ContainsKey(slot.SymbolId))
+                    placedImage = fruitImagesAlt[slot.SymbolId];
+                else
+                    placedImage = null;
             }
-        }
-
-        // draw the blobs
-        if (blobList.Count > 0)
-        {
-            lock (blobList)
+            else
             {
-                foreach (TuioBlob tblb in blobList.Values)
+                if (fruitImages.ContainsKey(slot.SymbolId))
+                    placedImage = fruitImages[slot.SymbolId];
+                else
+                    placedImage = null;
+            }
+            if (placedImage == null) continue;
+
+            RectangleF slotRect = GetSlotBounds(slot);
+            Rectangle drawRect = Rectangle.Round(slotRect);
+
+            // Draw the colored fruit over the silhouette area once correctly placed.
+            g.DrawImage(placedImage, drawRect);
+        }
+    }
+
+    private RectangleF GetSlotBounds(TargetSlot slot)
+    {
+        float centerX = slot.XNormalized * width;
+        float centerY = slot.YNormalized * height;
+        float slotWidth = slot.WidthNormalized * width;
+        float slotHeight = slot.HeightNormalized * height;
+        return new RectangleF(centerX - (slotWidth / 2f), centerY - (slotHeight / 2f), slotWidth, slotHeight);
+    }
+
+    private void DrawObjects(Graphics g)
+    {
+        HashSet<int> activeIds = new HashSet<int>(CurrentLevel.Targets.Select(t => t.SymbolId));
+
+        lock (objectList)
+        {
+            foreach (TuioObject tobj in objectList.Values)
+            {
+                if (!activeIds.Contains(tobj.SymbolID)) continue;
+                if (CurrentLevel.Targets.Any(t => t.SymbolId == tobj.SymbolID && t.IsPlaced)) continue;
+
+                int ox = tobj.getScreenX(width);
+                int oy = tobj.getScreenY(height);
+                bool isRotated90 = Math.Abs(Math.Cos(tobj.Angle)) < 0.707;
+
+                Image imgToDraw = null;
+                if (UseAlternateImageForSymbol(tobj.SymbolID, isRotated90) && fruitImagesAlt.ContainsKey(tobj.SymbolID))
                 {
-                    int bx = tblb.getScreenX(width);
-                    int by = tblb.getScreenY(height);
-                    float bw = tblb.Width * width;
-                    float bh = tblb.Height * height;
+                    imgToDraw = fruitImagesAlt[tobj.SymbolID];
+                }
+                else if (fruitImages.ContainsKey(tobj.SymbolID))
+                {
+                    imgToDraw = fruitImages[tobj.SymbolID];
+                }
 
-                    g.TranslateTransform(bx, by);
-                    g.RotateTransform((float)(tblb.Angle / Math.PI * 180.0f));
-                    g.TranslateTransform(-bx, -by);
-
-                    g.FillEllipse(blbBrush, bx - bw / 2, by - bh / 2, bw, bh);
-
-                    g.TranslateTransform(bx, by);
-                    g.RotateTransform(-1 * (float)(tblb.Angle / Math.PI * 180.0f));
-                    g.TranslateTransform(-bx, -by);
-
-                    g.DrawString(tblb.BlobID + "", font, fntBrush, new PointF(bx, by));
+                if (imgToDraw != null)
+                {
+                    int imageSize = height / 4;
+                    g.FillEllipse(new SolidBrush(Color.FromArgb(110, 255, 255, 255)), ox - imageSize / 2 - 12, oy - imageSize / 2 - 12, imageSize + 24, imageSize + 24);
+                    g.DrawImage(imgToDraw, new Rectangle(ox - imageSize / 2, oy - imageSize / 2, imageSize, imageSize));
+                }
+                else
+                {
+                    int size = height / 9;
+                    g.FillRectangle(Brushes.DarkRed, new Rectangle(ox - size / 2, oy - size / 2, size, size));
+                    g.DrawString(tobj.SymbolID.ToString(), smallFont, Brushes.White, new PointF(ox - 10, oy - 10));
                 }
             }
         }
     }
 
-    private void InitializeComponent()
+    private bool UseAlternateImageForSymbol(int symbolId, bool isRotated90)
     {
-            this.SuspendLayout();
-            // 
-            // TuioDemo
-            // 
-            this.ClientSize = new System.Drawing.Size(284, 261);
-            this.Name = "TuioDemo";
-            this.Load += new System.EventHandler(this.TuioDemo_Load);
-            this.ResumeLayout(false);
-
+        if (!isRotated90) return false;
+        return fruitImagesAlt.ContainsKey(symbolId) && fruitImages.ContainsKey(symbolId) && fruitImagesAlt[symbolId] != null;
     }
 
-    private void TuioDemo_Load(object sender, EventArgs e)
+    private bool IsValidPlacementState(int symbolId, bool isRotated90)
     {
+        // Kiwi (6) and watermelon (3) are valid only in cut/rotated state.
+        if (symbolId == 3 || symbolId == 6) return isRotated90;
 
+        // Other fruits must be whole (not rotated to cut state) to be accepted.
+        return !isRotated90;
     }
 
-    public static void Main(String[] argv)
+    private void DrawHud(Graphics g)
     {
-        int port = 0;
+        if (CurrentLevel == null) return;
+
+        int placedCount = CurrentLevel.Targets.Count(t => t.IsPlaced);
+        int totalCount = CurrentLevel.Targets.Count;
+        double elapsed = (DateTime.Now - levelStartTime).TotalSeconds;
+
+        string line1 = CurrentLevel.Name + "  |  Progress: " + placedCount + "/" + totalCount;
+        string line2 = "Time: " + elapsed.ToString("0.0") + " sec  |  Place fruits in the matching silhouettes";
+        string line3;
+        if (currentLevelIndex == 0)
+            line3 = "Level 1 markers: Apple=0, Banana=1";
+        else
+            line3 = "Level 2 markers: Strawberry=2, Watermelon=3, Mango=4, Orange=5, Kiwi=6";
+
+        g.FillRectangle(darkOverlayBrush, 10, 10, width - 20, 88);
+        g.DrawString(line1, titleFont, whiteBrush, 20, 14);
+        g.DrawString(line2, smallFont, whiteBrush, 20, 48);
+        g.DrawString(line3, smallFont, whiteBrush, 20, 68);
+    }
+
+    public static void Main(string[] argv)
+    {
+        int port;
         switch (argv.Length)
         {
             case 1:
                 port = int.Parse(argv[0], null);
-                if (port == 0) goto default;
+                if (port == 0)
+                {
+                    Console.WriteLine("usage: mono TuioDemo [port]");
+                    return;
+                }
                 break;
             case 0:
                 port = 3333;
                 break;
             default:
                 Console.WriteLine("usage: mono TuioDemo [port]");
-                System.Environment.Exit(0);
-                break;
+                return;
         }
 
         LoginForm login = new LoginForm(port);

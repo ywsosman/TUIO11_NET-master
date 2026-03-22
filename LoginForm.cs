@@ -41,7 +41,7 @@ public class LoginForm : Form, TuioListener
         this.label1.Name = "label1";
         this.label1.Size = new Size(200, 20);
         this.label1.TabIndex = 1;
-        this.label1.Text = "Don't have an account? Signup";
+        this.label1.Text = "Don't have an account\u003F Signup";
         this.label1.TextAlign = ContentAlignment.MiddleCenter;
 
         // LoginForm
@@ -73,7 +73,7 @@ public class LoginForm : Form, TuioListener
     public void addTuioObject(TuioObject tobj)
     {
         // Only login if the marker ID is between 0 and 7
-        if (isScanning && tobj.SymbolID >= 0 || tobj.SymbolID <= 7)
+        if (isScanning && tobj.SymbolID >= 0 && tobj.SymbolID <= 7)
         {
             this.Invoke((MethodInvoker)delegate {
                 btnScan.Text = "Logged in (ID: " + tobj.SymbolID + ")!";
