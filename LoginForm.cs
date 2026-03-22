@@ -41,7 +41,7 @@ public class LoginForm : Form, TuioListener
         this.label1.Name = "label1";
         this.label1.Size = new Size(200, 20);
         this.label1.TabIndex = 1;
-        this.label1.Text = "Don't have an account\u003F Signup";
+        this.label1.Text = "Don't have an account? Signup";
         this.label1.TextAlign = ContentAlignment.MiddleCenter;
 
         // LoginForm
