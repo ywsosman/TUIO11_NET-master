@@ -1,0 +1,9 @@
+# PyQt5 HCI radial menu (see hci_radial_menu.py)
+PyQt5>=5.15.0
+pyttsx3>=2.90
+
+# Gesture server (separate process): python/gesture_server.py
+# opencv-python
+# mediapipe
+# numpy
+# dollarpy
