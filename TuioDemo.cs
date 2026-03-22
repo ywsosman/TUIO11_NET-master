@@ -648,6 +648,24 @@ public class TuioDemo : Form, TuioListener
         g.DrawString(line3, smallFont, whiteBrush, 20, 68);
     }
 
+    private void InitializeComponent()
+    {
+            this.SuspendLayout();
+            // 
+            // TuioDemo
+            // 
+            this.ClientSize = new System.Drawing.Size(284, 261);
+            this.Name = "TuioDemo";
+            this.Load += new System.EventHandler(this.TuioDemo_Load);
+            this.ResumeLayout(false);
+
+    }
+
+    private void TuioDemo_Load(object sender, EventArgs e)
+    {
+
+    }
+
     public static void Main(string[] argv)
     {
         int port;
