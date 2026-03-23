@@ -6,8 +6,9 @@ using System.Linq;
 using System.Speech.Synthesis;
 using System.Windows.Forms;
 using TUIO;
+using GestureClient;
 
-public class TuioDemo : Form, TuioListener
+public class TuioDemo : Form, TuioListener, IGestureListener
 {
     private class TargetSlot
     {
@@ -28,6 +29,10 @@ public class TuioDemo : Form, TuioListener
     }
 
     private TuioClient client;
+    private GestureSocketClient gestureClient;
+    private bool radialGestureMode;
+    private bool radialCursorFollowsGesture;
+    private float gestureWristX = -1f, gestureWristY = -1f;
     private readonly Dictionary<long, TuioObject> objectList = new Dictionary<long, TuioObject>(128);
     private readonly Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
     private readonly Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(128);
@@ -81,15 +86,16 @@ public class TuioDemo : Form, TuioListener
     private readonly int radialRepeatDelayMs = 250;
     private bool speechIsPlaying;
 
-    public TuioDemo(int port)
+    public TuioDemo(int port, bool useRadialGestureMode = false)
     {
         verbose = false;
         fullscreen = false;
+        radialGestureMode = useRadialGestureMode;
         width = windowWidth;
         height = windowHeight;
         ClientSize = new Size(width, height);
         Name = "TuioDemo";
-        Text = "Fruit Learning Game";
+        Text = useRadialGestureMode ? "Fruit Learning Game (Radial Gesture)" : "Fruit Learning Game";
 
         Closing += Form_Closing;
         KeyDown += Form_KeyDown;
@@ -117,9 +123,80 @@ public class TuioDemo : Form, TuioListener
         StartLevel(0);
         InitializeRadialMenu();
 
-        client = new TuioClient(port);
-        client.addTuioListener(this);
-        client.connect();
+        if (radialGestureMode)
+        {
+            gestureClient = new GestureSocketClient("127.0.0.1", 5000);
+            gestureClient.AddListener(this);
+            try
+            {
+                gestureClient.Connect();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Could not connect to gesture server.\nStart: python radial_gesture_server.py\n" + ex.Message, "Radial Gesture", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        else
+        {
+            client = new TuioClient(port);
+            client.addTuioListener(this);
+            client.connect();
+        }
+    }
+
+    public void OnSkeletonUpdate(double timestamp, IList<SkeletonLandmark> landmarks)
+    {
+        if (!radialGestureMode || landmarks == null) return;
+        var wrist = landmarks.FirstOrDefault(l => l.Name == "right_wrist" || l.Name == "left_wrist" || l.Name == "right_index" || l.Name == "left_index");
+        if (wrist != null && wrist.Visibility > 0.3f)
+        {
+            gestureWristX = wrist.X;
+            gestureWristY = wrist.Y;
+        }
+        else
+        {
+            gestureWristX = -1f;
+            gestureWristY = -1f;
+        }
+        if (radialMenuOpen && radialCursorFollowsGesture && gestureWristX >= 0 && gestureWristY >= 0)
+        {
+            int px = (int)(gestureWristX * width);
+            int py = (int)(gestureWristY * height);
+            radialCursorPoint = new Point(px, py);
+        }
+        if (IsHandleCreated && !IsDisposed)
+            BeginInvoke((MethodInvoker)(() => Invalidate()));
+    }
+
+    public void OnGestureRecognized(double timestamp, RecognizedGesture gesture)
+    {
+        if (!radialGestureMode || gesture == null) return;
+        string g = gesture.Name.ToLowerInvariant();
+        if (g == "pointer_up")
+        {
+            if (!radialMenuOpen)
+                BeginInvoke((MethodInvoker)OpenRadialMenuLayer1);
+            return;
+        }
+        if (g == "fist")
+        {
+            if (radialMenuOpen)
+                BeginInvoke((MethodInvoker)CloseRadialMenu);
+            return;
+        }
+        if (g == "open_hand")
+        {
+            if (radialMenuOpen)
+            {
+                radialCursorFollowsGesture = true;
+                int cx = width / 2;
+                int cy = height / 2;
+                radialCursorPoint = new Point(cx, cy);
+            }
+            return;
+        }
+        if (IsHandleCreated && !IsDisposed)
+            BeginInvoke((MethodInvoker)(() => Invalidate()));
     }
 
     private void BuildLevels()
@@ -340,12 +417,18 @@ public class TuioDemo : Form, TuioListener
 
     private void Form_MouseMove(object sender, MouseEventArgs e)
     {
-        radialCursorPoint = e.Location;
+        if (!radialGestureMode || !radialCursorFollowsGesture)
+            radialCursorPoint = e.Location;
     }
 
     private void Form_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
         radialTimer.Stop();
+        if (gestureClient != null)
+        {
+            gestureClient.RemoveListener(this);
+            gestureClient.Disconnect();
+        }
         if (speech != null)
         {
             try
@@ -788,13 +871,14 @@ public class TuioDemo : Form, TuioListener
         radialMenuOpen = true;
         radialLayer = "layer1";
         radialSubMode = "";
+        radialCursorFollowsGesture = false;
         radialLabels.Clear();
         radialLabels.Add("Colors");
         radialLabels.Add("Info");
         radialLabels.Add("Level Control");
         radialLabels.Add("Audio");
         radialLabels.Add("Exit");
-        radialCursorPoint = PointToClient(Cursor.Position);
+        radialCursorPoint = radialGestureMode ? new Point(width / 2, height / 2) : PointToClient(Cursor.Position);
         radialHoveredIndex = -1;
         radialHoverSince = DateTime.MinValue;
         radialSelectionLocked = false;
@@ -806,6 +890,7 @@ public class TuioDemo : Form, TuioListener
         radialMenuOpen = false;
         radialLayer = "none";
         radialSubMode = "";
+        radialCursorFollowsGesture = false;
         radialLabels.Clear();
         radialHoveredIndex = -1;
         radialHoverSince = DateTime.MinValue;
@@ -1446,7 +1531,9 @@ public class TuioDemo : Form, TuioListener
         string line1 = CurrentLevel.Name + "  |  Progress: " + placedCount + "/" + totalCount;
         string line2 = "Time: " + elapsed.ToString("0.0") + " sec  |  Place fruits in the matching silhouettes";
         string line3;
-        if (currentLevelIndex == 0)
+        if (radialGestureMode)
+            line3 = "Radial: circle=open | square=close | open_hand=select (O key also opens)";
+        else if (currentLevelIndex == 0)
             line3 = "Level 1 markers: Apple=0, Banana=1";
         else
             line3 = "Level 2 markers: Strawberry=2, Watermelon=3, Mango=4, Orange=5, Kiwi=6";
@@ -1499,7 +1586,7 @@ public class TuioDemo : Form, TuioListener
         LoginForm login = new LoginForm(port);
         if (login.ShowDialog() == DialogResult.OK)
         {
-            Application.Run(new TuioDemo(port));
+            Application.Run(new TuioDemo(port, login.UseRadialGestureMode));
         }
     }
 }

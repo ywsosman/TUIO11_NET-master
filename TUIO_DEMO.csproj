@@ -61,6 +61,8 @@
     <Compile Include="LoginForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="GestureClient\IGestureListener.cs" />
+    <Compile Include="GestureClient\GestureSocketClient.cs" />
     <Compile Include="TUIO\TuioClient.cs" />
     <Compile Include="TUIO\TuioContainer.cs" />
     <Compile Include="TUIO\TuioCursor.cs" />
