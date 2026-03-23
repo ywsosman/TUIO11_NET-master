@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Speech.Synthesis;
 using System.Windows.Forms;
 using TUIO;
 
@@ -56,6 +57,29 @@ public class TuioDemo : Form, TuioListener
     private readonly Font titleFont = new Font("Arial", 22.0f, FontStyle.Bold);
     private readonly SolidBrush whiteBrush = new SolidBrush(Color.White);
     private readonly SolidBrush darkOverlayBrush = new SolidBrush(Color.FromArgb(140, 0, 0, 0));
+    private readonly Font radialFont = new Font("Arial", 14.0f, FontStyle.Bold);
+    private readonly Timer radialTimer = new Timer();
+    private readonly Dictionary<int, string> fruitNames = new Dictionary<int, string>();
+    private readonly Dictionary<int, string> fruitColors = new Dictionary<int, string>();
+    private readonly Dictionary<int, string> fruitBenefits = new Dictionary<int, string>();
+    private readonly Dictionary<int, string> fruitColorAudio = new Dictionary<int, string>();
+    private readonly List<string> radialLabels = new List<string>();
+    private SpeechSynthesizer speech;
+    private bool radialMenuOpen;
+    private bool radialMuted;
+    private string radialLayer = "none";
+    private string radialSubMode = "";
+    private string lastAudioKind = "";
+    private string lastSpokenSentence = "";
+    private string lastMp3Path = "";
+    private Point radialCursorPoint = Point.Empty;
+    private int radialHoveredIndex = -1;
+    private DateTime radialHoverSince = DateTime.MinValue;
+    private readonly int radialDwellMs = 500;
+    private bool radialSelectionLocked;
+    private DateTime radialLastActionAt = DateTime.MinValue;
+    private readonly int radialRepeatDelayMs = 250;
+    private bool speechIsPlaying;
 
     public TuioDemo(int port)
     {
@@ -69,6 +93,7 @@ public class TuioDemo : Form, TuioListener
 
         Closing += Form_Closing;
         KeyDown += Form_KeyDown;
+        MouseMove += Form_MouseMove;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.DoubleBuffer, true);
 
         try
@@ -86,8 +111,11 @@ public class TuioDemo : Form, TuioListener
         }
 
         LoadAssets();
+        BuildRadialFruitData();
+        InitializeRadialSpeech();
         BuildLevels();
         StartLevel(0);
+        InitializeRadialMenu();
 
         client = new TuioClient(port);
         client.addTuioListener(this);
@@ -300,10 +328,36 @@ public class TuioDemo : Form, TuioListener
         {
             verbose = !verbose;
         }
+        else if (e.KeyData == Keys.O)
+        {
+            OpenRadialMenuLayer1();
+        }
+        else if (e.KeyData == Keys.X)
+        {
+            CloseRadialMenu();
+        }
+    }
+
+    private void Form_MouseMove(object sender, MouseEventArgs e)
+    {
+        radialCursorPoint = e.Location;
     }
 
     private void Form_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        radialTimer.Stop();
+        if (speech != null)
+        {
+            try
+            {
+                speech.SpeakAsyncCancelAll();
+                speech.Dispose();
+            }
+            catch
+            {
+            }
+        }
+
         if (client != null)
         {
             client.removeTuioListener(this);
@@ -495,6 +549,761 @@ public class TuioDemo : Form, TuioListener
         DrawPlacedFruits(g);
         DrawObjects(g);
         DrawHud(g);
+        DrawRadialMenu(g);
+    }
+
+    private void BuildRadialFruitData()
+    {
+        fruitNames[0] = "Apple";
+        fruitNames[1] = "Banana";
+        fruitNames[2] = "Strawberry";
+        fruitNames[3] = "Watermelon";
+        fruitNames[4] = "Mango";
+        fruitNames[5] = "Orange";
+        fruitNames[6] = "Kiwi";
+
+        fruitColors[0] = "Red";
+        fruitColors[1] = "Yellow";
+        fruitColors[2] = "Red";
+        fruitColors[3] = "Green";
+        fruitColors[4] = "Orange";
+        fruitColors[5] = "Orange";
+        fruitColors[6] = "Green";
+
+        fruitBenefits[0] = "Apple helps keep you healthy.";
+        fruitBenefits[1] = "Banana gives you energy.";
+        fruitBenefits[2] = "Strawberry helps your skin stay healthy.";
+        fruitBenefits[3] = "Watermelon helps you stay hydrated.";
+        fruitBenefits[4] = "Mango helps your eyes stay strong.";
+        fruitBenefits[5] = "Orange helps your body fight colds.";
+        fruitBenefits[6] = "Kiwi helps your tummy feel happy.";
+
+        fruitColorAudio[0] = "apple_color.mp3";
+        fruitColorAudio[1] = "banana_color.mp3";
+        fruitColorAudio[2] = "straw_color.mp3";
+        fruitColorAudio[3] = "waterm_color.mp3";
+        fruitColorAudio[4] = "mango_color.mp3";
+        fruitColorAudio[5] = "orange_color.mp3";
+        fruitColorAudio[6] = "kiwi_color.mp3";
+    }
+
+    private void InitializeRadialSpeech()
+    {
+        try
+        {
+            speech = new SpeechSynthesizer();
+            speech.Rate = 0;
+            speech.Volume = 100;
+            speech.SpeakCompleted += Speech_SpeakCompleted;
+        }
+        catch
+        {
+            speech = null;
+        }
+    }
+
+    private void Speech_SpeakCompleted(object sender, SpeakCompletedEventArgs e)
+    {
+        speechIsPlaying = false;
+    }
+
+    private void InitializeRadialMenu()
+    {
+        radialTimer.Interval = 33;
+        radialTimer.Tick += RadialTimer_Tick;
+        radialTimer.Start();
+    }
+
+    private void RadialTimer_Tick(object sender, EventArgs e)
+    {
+        if (!radialMenuOpen)
+        {
+            return;
+        }
+
+        int index = GetRadialSectorIndex(radialCursorPoint);
+        if (index < 0)
+        {
+            radialHoveredIndex = -1;
+            radialHoverSince = DateTime.MinValue;
+            radialSelectionLocked = false;
+            Invalidate();
+            return;
+        }
+
+        if (index != radialHoveredIndex)
+        {
+            radialHoveredIndex = index;
+            radialHoverSince = DateTime.Now;
+            radialSelectionLocked = false;
+            Invalidate();
+            return;
+        }
+
+        if (radialHoverSince == DateTime.MinValue)
+        {
+            radialHoverSince = DateTime.Now;
+            Invalidate();
+            return;
+        }
+
+        double elapsed = (DateTime.Now - radialHoverSince).TotalMilliseconds;
+        if (radialSelectionLocked)
+        {
+            if (CanRepeatCurrentHover(index))
+            {
+                double repeatElapsed = (DateTime.Now - radialLastActionAt).TotalMilliseconds;
+                if (repeatElapsed >= radialRepeatDelayMs)
+                {
+                    radialLastActionAt = DateTime.Now;
+                    ActivateRadialSelection(index);
+                }
+            }
+            Invalidate();
+            return;
+        }
+
+        if (elapsed >= radialDwellMs)
+        {
+            radialHoverSince = DateTime.Now;
+            radialLastActionAt = DateTime.Now;
+            radialSelectionLocked = true;
+            ActivateRadialSelection(index);
+        }
+        Invalidate();
+    }
+
+    private bool CanRepeatCurrentHover(int index)
+    {
+        if (index < 0 || index >= radialLabels.Count)
+        {
+            return false;
+        }
+        if (radialMuted)
+        {
+            return false;
+        }
+
+        string label = radialLabels[index];
+        if (radialLayer != "layer2")
+        {
+            return false;
+        }
+
+        if (radialSubMode == "colors")
+        {
+            if (label == "Back")
+            {
+                return false;
+            }
+            return !IsAnyAudioPlaying();
+        }
+        if (radialSubMode == "info")
+        {
+            if (label == "Back")
+            {
+                return false;
+            }
+            return !IsAnyAudioPlaying();
+        }
+        if (radialSubMode == "audio")
+        {
+            if (label == "Repeat Last Audio")
+            {
+                if (lastAudioKind == "tts" || lastAudioKind == "mp3")
+                {
+                    return !IsAnyAudioPlaying();
+                }
+            }
+        }
+        return false;
+    }
+
+    private bool IsAnyAudioPlaying()
+    {
+        if (speechIsPlaying)
+        {
+            return true;
+        }
+        if (IsMediaPlayerPlaying())
+        {
+            return true;
+        }
+        return false;
+    }
+
+    private bool IsMediaPlayerPlaying()
+    {
+        try
+        {
+            if (fruitPlayer == null)
+            {
+                return false;
+            }
+            int state = (int)fruitPlayer.playState;
+            if (state == 3)
+            {
+                return true;
+            }
+            if (state == 6)
+            {
+                return true;
+            }
+            if (state == 9)
+            {
+                return true;
+            }
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private HashSet<int> GetActiveFruitIds()
+    {
+        HashSet<int> ids = new HashSet<int>();
+        if (CurrentLevel == null)
+        {
+            return ids;
+        }
+
+        foreach (var slot in CurrentLevel.Targets)
+        {
+            ids.Add(slot.SymbolId);
+        }
+        return ids;
+    }
+
+    private List<int> GetSortedActiveFruitIds()
+    {
+        var ids = GetActiveFruitIds().ToList();
+        ids.Sort();
+        return ids;
+    }
+
+    private void OpenRadialMenuLayer1()
+    {
+        radialMenuOpen = true;
+        radialLayer = "layer1";
+        radialSubMode = "";
+        radialLabels.Clear();
+        radialLabels.Add("Colors");
+        radialLabels.Add("Info");
+        radialLabels.Add("Level Control");
+        radialLabels.Add("Audio");
+        radialLabels.Add("Exit");
+        radialCursorPoint = PointToClient(Cursor.Position);
+        radialHoveredIndex = -1;
+        radialHoverSince = DateTime.MinValue;
+        radialSelectionLocked = false;
+        Invalidate();
+    }
+
+    private void CloseRadialMenu()
+    {
+        radialMenuOpen = false;
+        radialLayer = "none";
+        radialSubMode = "";
+        radialLabels.Clear();
+        radialHoveredIndex = -1;
+        radialHoverSince = DateTime.MinValue;
+        radialSelectionLocked = false;
+        Invalidate();
+    }
+
+    private void BuildRadialLayer2Fruits()
+    {
+        radialLabels.Clear();
+        radialLabels.Add("Back");
+        foreach (int id in GetSortedActiveFruitIds())
+        {
+            if (fruitNames.ContainsKey(id))
+            {
+                radialLabels.Add(fruitNames[id]);
+            }
+        }
+    }
+
+    private void BuildRadialLayer2Level()
+    {
+        radialLabels.Clear();
+        radialLabels.Add("Back");
+        radialLabels.Add("Restart Level");
+        radialLabels.Add("Go to Level 1");
+        radialLabels.Add("Go to Level 2");
+    }
+
+    private void BuildRadialLayer2Audio()
+    {
+        radialLabels.Clear();
+        radialLabels.Add("Back");
+        radialLabels.Add("Repeat Last Audio");
+        if (radialMuted)
+        {
+            radialLabels.Add("Unmute");
+        }
+        else
+        {
+            radialLabels.Add("Mute");
+        }
+    }
+
+    private void ActivateRadialSelection(int index)
+    {
+        if (index < 0 || index >= radialLabels.Count)
+        {
+            return;
+        }
+
+        string label = radialLabels[index];
+        if (radialLayer == "layer1")
+        {
+            if (label == "Colors")
+            {
+                radialLayer = "layer2";
+                radialSubMode = "colors";
+                BuildRadialLayer2Fruits();
+                return;
+            }
+            if (label == "Info")
+            {
+                radialLayer = "layer2";
+                radialSubMode = "info";
+                BuildRadialLayer2Fruits();
+                return;
+            }
+            if (label == "Level Control")
+            {
+                radialLayer = "layer2";
+                radialSubMode = "level";
+                BuildRadialLayer2Level();
+                return;
+            }
+            if (label == "Audio")
+            {
+                radialLayer = "layer2";
+                radialSubMode = "audio";
+                BuildRadialLayer2Audio();
+                return;
+            }
+            if (label == "Exit")
+            {
+                CloseRadialMenu();
+                return;
+            }
+            return;
+        }
+
+        if (radialLayer == "layer2")
+        {
+            if (radialSubMode == "colors")
+            {
+                HandleRadialColors(label);
+                return;
+            }
+            if (radialSubMode == "info")
+            {
+                HandleRadialInfo(label);
+                return;
+            }
+            if (radialSubMode == "level")
+            {
+                HandleRadialLevel(label);
+                return;
+            }
+            if (radialSubMode == "audio")
+            {
+                HandleRadialAudio(label);
+                return;
+            }
+        }
+    }
+
+    private void HandleRadialColors(string label)
+    {
+        if (label == "Back")
+        {
+            OpenRadialMenuLayer1();
+            return;
+        }
+
+        foreach (int id in GetSortedActiveFruitIds())
+        {
+            if (!fruitNames.ContainsKey(id))
+            {
+                continue;
+            }
+            if (fruitNames[id] == label)
+            {
+                PlayFruitColorAudio(id);
+                return;
+            }
+        }
+    }
+
+    private void HandleRadialInfo(string label)
+    {
+        if (label == "Back")
+        {
+            OpenRadialMenuLayer1();
+            return;
+        }
+
+        foreach (int id in GetSortedActiveFruitIds())
+        {
+            if (!fruitNames.ContainsKey(id))
+            {
+                continue;
+            }
+            if (fruitNames[id] == label)
+            {
+                if (fruitBenefits.ContainsKey(id))
+                {
+                    SpeakSentence(fruitBenefits[id]);
+                }
+                return;
+            }
+        }
+    }
+
+    private void HandleRadialLevel(string label)
+    {
+        if (label == "Back")
+        {
+            OpenRadialMenuLayer1();
+            return;
+        }
+
+        if (label == "Restart Level")
+        {
+            StartLevel(currentLevelIndex);
+            return;
+        }
+        if (label == "Go to Level 1")
+        {
+            StartLevel(0);
+            return;
+        }
+        if (label == "Go to Level 2")
+        {
+            StartLevel(1);
+            return;
+        }
+    }
+
+    private void HandleRadialAudio(string label)
+    {
+        if (label == "Back")
+        {
+            OpenRadialMenuLayer1();
+            return;
+        }
+
+        if (label == "Repeat Last Audio")
+        {
+            RepeatLastAudio();
+            return;
+        }
+        if (label == "Mute")
+        {
+            radialMuted = true;
+            StopAllRadialAudio();
+            BuildRadialLayer2Audio();
+            return;
+        }
+        if (label == "Unmute")
+        {
+            radialMuted = false;
+            BuildRadialLayer2Audio();
+            return;
+        }
+    }
+
+    private void StopAllRadialAudio()
+    {
+        try
+        {
+            if (fruitPlayer != null)
+            {
+                fruitPlayer.controls.stop();
+            }
+        }
+        catch
+        {
+        }
+
+        speechIsPlaying = false;
+
+        try
+        {
+            if (speech != null)
+            {
+                speech.SpeakAsyncCancelAll();
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void PlayFruitColorAudio(int fruitId)
+    {
+        if (radialMuted)
+        {
+            return;
+        }
+        if (!fruitColorAudio.ContainsKey(fruitId))
+        {
+            return;
+        }
+
+        string mp3Name = fruitColorAudio[fruitId];
+        string fullPath = GetAssetsPath(mp3Name);
+        if (string.IsNullOrEmpty(fullPath))
+        {
+            return;
+        }
+        if (fruitPlayer == null)
+        {
+            return;
+        }
+
+        try
+        {
+            fruitPlayer.controls.stop();
+            fruitPlayer.URL = fullPath;
+            fruitPlayer.controls.play();
+            lastAudioKind = "mp3";
+            lastMp3Path = fullPath;
+            lastSpokenSentence = "";
+        }
+        catch
+        {
+        }
+    }
+
+    private void SpeakSentence(string sentence)
+    {
+        if (radialMuted)
+        {
+            return;
+        }
+        if (string.IsNullOrEmpty(sentence))
+        {
+            return;
+        }
+        if (speech == null)
+        {
+            return;
+        }
+
+        try
+        {
+            speech.SpeakAsyncCancelAll();
+            speechIsPlaying = true;
+            speech.SpeakAsync(sentence);
+            lastAudioKind = "tts";
+            lastSpokenSentence = sentence;
+            lastMp3Path = "";
+        }
+        catch
+        {
+        }
+    }
+
+    private void RepeatLastAudio()
+    {
+        if (radialMuted)
+        {
+            return;
+        }
+
+        if (lastAudioKind == "tts")
+        {
+            if (!string.IsNullOrEmpty(lastSpokenSentence))
+            {
+                SpeakSentence(lastSpokenSentence);
+            }
+            return;
+        }
+
+        if (lastAudioKind == "mp3")
+        {
+            if (string.IsNullOrEmpty(lastMp3Path))
+            {
+                return;
+            }
+            if (fruitPlayer == null)
+            {
+                return;
+            }
+            try
+            {
+                fruitPlayer.controls.stop();
+                fruitPlayer.URL = lastMp3Path;
+                fruitPlayer.controls.play();
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private int GetRadialSectorIndex(Point cursor)
+    {
+        if (!radialMenuOpen)
+        {
+            return -1;
+        }
+        if (radialLabels.Count == 0)
+        {
+            return -1;
+        }
+
+        Point center = new Point(width / 2, height / 2);
+        float minSide = Math.Min(width, height);
+        float innerRadius = minSide * 0.12f;
+        float outerRadius = minSide * 0.44f;
+        float dx = cursor.X - center.X;
+        float dy = cursor.Y - center.Y;
+        float dist = (float)Math.Sqrt((dx * dx) + (dy * dy));
+
+        if (dist < innerRadius)
+        {
+            return -1;
+        }
+        if (dist > outerRadius)
+        {
+            return -1;
+        }
+
+        float angle = (float)(Math.Atan2(dy, dx) * (180.0 / Math.PI));
+        float adjusted = angle + 90.0f;
+        while (adjusted < 0.0f)
+        {
+            adjusted = adjusted + 360.0f;
+        }
+        while (adjusted >= 360.0f)
+        {
+            adjusted = adjusted - 360.0f;
+        }
+        float sectorSpan = 360.0f / radialLabels.Count;
+        int index = (int)(adjusted / sectorSpan);
+
+        if (index < 0)
+        {
+            index = 0;
+        }
+        if (index >= radialLabels.Count)
+        {
+            index = radialLabels.Count - 1;
+        }
+        return index;
+    }
+
+    private void DrawRadialMenu(Graphics g)
+    {
+        if (!radialMenuOpen)
+        {
+            return;
+        }
+        if (radialLabels.Count == 0)
+        {
+            return;
+        }
+
+        using (var overlayBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+        {
+            g.FillRectangle(overlayBrush, new Rectangle(0, 0, width, height));
+        }
+
+        Point center = new Point(width / 2, height / 2);
+        float minSide = Math.Min(width, height);
+        float innerRadius = minSide * 0.12f;
+        float outerRadius = minSide * 0.44f;
+        Rectangle outerRect = new Rectangle(
+            (int)(center.X - outerRadius),
+            (int)(center.Y - outerRadius),
+            (int)(outerRadius * 2.0f),
+            (int)(outerRadius * 2.0f)
+        );
+        float span = 360.0f / radialLabels.Count;
+        float start = -90.0f;
+
+        for (int i = 0; i < radialLabels.Count; i++)
+        {
+            Color fillColor;
+            if (i == radialHoveredIndex)
+            {
+                fillColor = Color.FromArgb(220, 80, 150, 230);
+            }
+            else
+            {
+                if ((i % 2) == 0)
+                {
+                    fillColor = Color.FromArgb(200, 40, 90, 160);
+                }
+                else
+                {
+                    fillColor = Color.FromArgb(200, 30, 70, 130);
+                }
+            }
+
+            using (var brush = new SolidBrush(fillColor))
+            using (var pen = new Pen(Color.FromArgb(230, 255, 255, 255), 2))
+            {
+                g.FillPie(brush, outerRect, start + (span * i), span);
+                g.DrawPie(pen, outerRect, start + (span * i), span);
+            }
+
+            float mid = start + (span * i) + (span / 2.0f);
+            float midRad = (float)(Math.PI / 180.0) * mid;
+            float labelRadius = (innerRadius + outerRadius) / 2.0f;
+            float tx = center.X + (labelRadius * (float)Math.Cos(midRad));
+            float ty = center.Y + (labelRadius * (float)Math.Sin(midRad));
+            RectangleF labelRect = new RectangleF(tx - 90.0f, ty - 20.0f, 180.0f, 40.0f);
+            var sf = new StringFormat();
+            sf.Alignment = StringAlignment.Center;
+            sf.LineAlignment = StringAlignment.Center;
+            g.DrawString(radialLabels[i], radialFont, Brushes.White, labelRect, sf);
+        }
+
+        using (var holeBrush = new SolidBrush(Color.FromArgb(120, 0, 0, 0)))
+        {
+            g.FillEllipse(
+                holeBrush,
+                new Rectangle(
+                    (int)(center.X - innerRadius),
+                    (int)(center.Y - innerRadius),
+                    (int)(innerRadius * 2.0f),
+                    (int)(innerRadius * 2.0f)
+                )
+            );
+        }
+
+        using (var tapBrush = new SolidBrush(Color.FromArgb(140, 255, 210, 80)))
+        using (var tapPen = new Pen(Color.FromArgb(230, 255, 255, 255), 2))
+        {
+            float tapRadius = minSide * 0.035f;
+            if (tapRadius < 12.0f)
+            {
+                tapRadius = 12.0f;
+            }
+            if (tapRadius > 32.0f)
+            {
+                tapRadius = 32.0f;
+            }
+            Rectangle tapRect = new Rectangle(
+                (int)(radialCursorPoint.X - tapRadius),
+                (int)(radialCursorPoint.Y - tapRadius),
+                (int)(tapRadius * 2.0f),
+                (int)(tapRadius * 2.0f)
+            );
+            g.FillEllipse(tapBrush, tapRect);
+            g.DrawEllipse(tapPen, tapRect);
+        }
     }
 
     private void DrawTargetZones(Graphics g)
