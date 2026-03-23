@@ -206,7 +206,6 @@ namespace GestureClient
             if (s[i] == '"') return ParseJsonString(s, ref i);
             if (s[i] == '{')
             {
-                i++;
                 return ParseJsonObject(s, ref i);
             }
             if (s[i] == '[')
