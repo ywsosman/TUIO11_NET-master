@@ -147,11 +147,17 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     public void OnSkeletonUpdate(double timestamp, IList<SkeletonLandmark> landmarks)
     {
         if (!radialGestureMode || landmarks == null) return;
+        // Prefer index tip over wrist for cursor (gesture server sends index tip as wrist in hand-only mode)
         var wrist = landmarks.FirstOrDefault(l => l.Name == "right_wrist" || l.Name == "left_wrist" || l.Name == "right_index" || l.Name == "left_index");
         if (wrist != null && wrist.Visibility > 0.3f)
         {
             gestureWristX = wrist.X;
             gestureWristY = wrist.Y;
+            // When menu is open and index finger is visible, auto-enable cursor following (no open_hand needed)
+            if (radialMenuOpen && !radialCursorFollowsGesture && gestureWristX >= 0 && gestureWristY >= 0)
+            {
+                radialCursorFollowsGesture = true;
+            }
         }
         else
         {
