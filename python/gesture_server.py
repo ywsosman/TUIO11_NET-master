@@ -16,6 +16,11 @@ from collections import deque
 import numpy as np
 
 try:
+    from face_emotion import FaceEmotionAnalyzer, draw_debug_overlay
+except ImportError:
+    pass  # Optional dependency
+
+try:
     from dollarpy import Recognizer, Template, Point
 except ImportError:
     raise ImportError("Install dollarpy: pip install dollarpy")
@@ -168,6 +173,13 @@ class GestureServer:
             self.holistic_landmarker = None
             print("[Server] Using hand_landmarker only (matches notebook)", flush=True)
 
+        try:
+            self.face_analyzer = FaceEmotionAnalyzer()
+            print("[Server] FaceEmotionAnalyzer loaded successfully.", flush=True)
+        except Exception as e:
+            print(f"[Server] FaceEmotionAnalyzer disabled: {e}", flush=True)
+            self.face_analyzer = None
+
     def _skeleton_from_hands(self, hand_landmarks, handedness=None):
         """Build cursor skeleton from hand index tips (C# expects right_wrist/left_wrist)."""
         if not hand_landmarks:
@@ -269,8 +281,17 @@ class GestureServer:
                 frame = cv2.flip(frame, 1)
                 rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 h, w = rgb.shape[:2]
-                msg = {"type": "frame", "timestamp": time.time(), "skeleton": [], "gesture": None}
+                msg = {"type": "frame", "timestamp": time.time(), "skeleton": [], "gesture": None, "emotion": None}
                 display_frame = frame.copy()
+
+                if self.face_analyzer:
+                    emotion_result = self.face_analyzer.analyze(frame)
+                    bbox = self.face_analyzer.last_bbox()
+                    msg["emotion"] = emotion_result
+
+                    face_debug = frame.copy()
+                    draw_debug_overlay(face_debug, emotion_result, bbox)
+                    cv2.imshow("Face Emotion Debug", face_debug)
 
                 # Full frame - no resize (matches notebook coordinate system)
                 mp_img = mp_image.Image(image_format=mp_image.ImageFormat.SRGB, data=rgb)
