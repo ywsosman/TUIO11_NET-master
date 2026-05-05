@@ -1,0 +1,4 @@
+# teacher_id,teacher_name,mac_address,role
+# Replace placeholder values with real database-exported records.
+T001,Teacher One,00:11:22:33:44:55,teacher
+T002,Teacher Two,AA:BB:CC:DD:EE:FF,teacher
