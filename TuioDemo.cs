@@ -4,6 +4,7 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Speech.Synthesis;
+using System.Threading;
 using System.Windows.Forms;
 using TUIO;
 using GestureClient;
@@ -107,6 +108,12 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     private DateTime radialLastActionAt = DateTime.MinValue;
     private readonly int radialRepeatDelayMs = 250;
     private bool speechIsPlaying;
+    private BluetoothTeacherPairingManager bluetoothPairingManager;
+    private readonly object bluetoothUiSync = new object();
+    private List<PairedTeacherDevice> bluetoothDevices = new List<PairedTeacherDevice>();
+    private string bluetoothStatusMessage = "";
+    private DateTime bluetoothStatusAt = DateTime.MinValue;
+    private bool bluetoothMenuOpen;
 
     public TuioDemo(int port, bool useRadialGestureMode = false)
     {
@@ -167,6 +174,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         BuildLevels();
         StartLevel(0);
         InitializeRadialMenu();
+        InitializeBluetoothPairing();
 
         // ── TUIO markers (always active – handles fruit placement) ────────────
         client = new TuioClient(port);
@@ -221,8 +229,18 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     {
         if (!radialGestureMode || gesture == null) return;
         string g = gesture.Name.ToLowerInvariant();
+        if (g == "backhand" || g == "back_hand" || g == "back_palm")
+        {
+            ToggleBluetoothMenu();
+            return;
+        }
         if (g == "pointer_up")
         {
+            if (!CanTeacherAccessMenus())
+            {
+                UpdateBluetoothStatus("No teacher paired");
+                return;
+            }
             if (!radialMenuOpen)
                 BeginInvoke((MethodInvoker)OpenRadialMenuLayer1);
             return;
@@ -504,6 +522,11 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     {
         animationTimer.Stop();
         radialTimer.Stop();
+        if (bluetoothPairingManager != null)
+        {
+            bluetoothPairingManager.Dispose();
+            bluetoothPairingManager = null;
+        }
 
         if (gestureClient != null)
         {
@@ -760,6 +783,186 @@ public class TuioDemo : Form, TuioListener, IGestureListener
 
         DrawHud(g);
         DrawRadialMenu(g);
+        DrawBluetoothPairingPanel(g);
+    }
+
+    private void InitializeBluetoothPairing()
+    {
+        bluetoothPairingManager = new BluetoothTeacherPairingManager();
+        bluetoothPairingManager.StatusMessage += OnBluetoothStatusMessage;
+        bluetoothPairingManager.PairingStateChanged += OnBluetoothPairingStateChanged;
+        bluetoothPairingManager.Start();
+    }
+
+    private void OnBluetoothStatusMessage(string message)
+    {
+        UpdateBluetoothStatus(message);
+    }
+
+    private void OnBluetoothPairingStateChanged(List<PairedTeacherDevice> devices)
+    {
+        lock (bluetoothUiSync)
+        {
+            bluetoothDevices = devices;
+        }
+
+        if (IsHandleCreated && !IsDisposed)
+        {
+            BeginInvoke((MethodInvoker)(() => Invalidate()));
+        }
+    }
+
+    private void UpdateBluetoothStatus(string message)
+    {
+        lock (bluetoothUiSync)
+        {
+            bluetoothStatusMessage = message;
+            bluetoothStatusAt = DateTime.Now;
+        }
+
+        Console.WriteLine("[Bluetooth] " + message);
+
+        if (IsHandleCreated && !IsDisposed)
+        {
+            BeginInvoke((MethodInvoker)(() => Invalidate()));
+        }
+    }
+
+    private bool CanTeacherAccessMenus()
+    {
+        if (bluetoothPairingManager == null)
+        {
+            return false;
+        }
+        return bluetoothPairingManager.HasAnyConnectedTeacher();
+    }
+
+    private void ToggleBluetoothMenu()
+    {
+        if (!IsHandleCreated || IsDisposed)
+        {
+            return;
+        }
+
+        BeginInvoke((MethodInvoker)delegate
+        {
+            if (!CanTeacherAccessMenus())
+            {
+                UpdateBluetoothStatus("No teacher paired");
+                bluetoothMenuOpen = true;
+                Invalidate();
+                return;
+            }
+
+            bluetoothMenuOpen = !bluetoothMenuOpen;
+            Invalidate();
+        });
+    }
+
+    private void DrawBluetoothPairingPanel(Graphics g)
+    {
+        bool shouldDraw = false;
+        if (bluetoothMenuOpen)
+        {
+            shouldDraw = true;
+        }
+
+        string statusToDraw = "";
+        DateTime statusAtToDraw = DateTime.MinValue;
+        List<PairedTeacherDevice> devicesToDraw = new List<PairedTeacherDevice>();
+        lock (bluetoothUiSync)
+        {
+            statusToDraw = bluetoothStatusMessage;
+            statusAtToDraw = bluetoothStatusAt;
+            devicesToDraw = new List<PairedTeacherDevice>(bluetoothDevices);
+        }
+
+        if (!shouldDraw)
+        {
+            if (!string.IsNullOrEmpty(statusToDraw))
+            {
+                double seconds = (DateTime.Now - statusAtToDraw).TotalSeconds;
+                if (seconds < 4.0)
+                {
+                    shouldDraw = true;
+                }
+            }
+        }
+
+        if (!shouldDraw)
+        {
+            return;
+        }
+
+        int panelWidth = 470;
+        int panelHeight = 330;
+        int panelX = width - panelWidth - 20;
+        int panelY = 120;
+        Rectangle panelRect = new Rectangle(panelX, panelY, panelWidth, panelHeight);
+
+        using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(225, 25, 35, 55)))
+        using (Pen borderPen = new Pen(Color.FromArgb(255, 120, 190, 255), 3))
+        {
+            g.FillRectangle(bgBrush, panelRect);
+            g.DrawRectangle(borderPen, panelRect);
+        }
+
+        string mainDeviceName = Environment.MachineName;
+        if (bluetoothPairingManager != null)
+        {
+            mainDeviceName = bluetoothPairingManager.MainDeviceName;
+        }
+
+        using (Font title = new Font("Arial", 16.0f, FontStyle.Bold))
+        using (Font lineFont = new Font("Arial", 12.0f, FontStyle.Regular))
+        using (SolidBrush textBrush = new SolidBrush(Color.White))
+        using (SolidBrush connectedBrush = new SolidBrush(Color.LimeGreen))
+        using (SolidBrush disconnectedBrush = new SolidBrush(Color.Orange))
+        {
+            g.DrawString("Bluetooth Pairing Menu", title, textBrush, panelX + 12, panelY + 10);
+            g.DrawString("Main Device: " + mainDeviceName, lineFont, textBrush, panelX + 12, panelY + 46);
+
+            int startY = panelY + 86;
+            int rowHeight = 26;
+            int index = 0;
+            while (index < devicesToDraw.Count)
+            {
+                PairedTeacherDevice device = devicesToDraw[index];
+                int rowY = startY + (index * rowHeight);
+                if (rowY > panelY + panelHeight - 56)
+                {
+                    break;
+                }
+
+                string stateText = "Not Paired";
+                SolidBrush stateBrush = disconnectedBrush;
+                if (device.IsConnected)
+                {
+                    stateText = "Paired";
+                    stateBrush = connectedBrush;
+                }
+
+                string teacherName = "Unknown Teacher";
+                if (device.Teacher != null)
+                {
+                    teacherName = device.Teacher.TeacherName;
+                }
+
+                g.DrawString(teacherName + " | " + device.DeviceName, lineFont, textBrush, panelX + 12, rowY);
+                g.DrawString(stateText, lineFont, stateBrush, panelX + panelWidth - 90, rowY);
+                index++;
+            }
+
+            if (devicesToDraw.Count == 0)
+            {
+                g.DrawString("No database-registered teachers loaded.", lineFont, disconnectedBrush, panelX + 12, startY);
+            }
+
+            if (!string.IsNullOrEmpty(statusToDraw))
+            {
+                g.DrawString(statusToDraw, lineFont, textBrush, panelX + 12, panelY + panelHeight - 32);
+            }
+        }
     }
 
     private void BuildRadialFruitData()
