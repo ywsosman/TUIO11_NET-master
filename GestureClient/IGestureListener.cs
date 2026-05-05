@@ -11,6 +11,7 @@ namespace GestureClient
     {
         void OnSkeletonUpdate(double timestamp, IList<SkeletonLandmark> landmarks);
         void OnGestureRecognized(double timestamp, RecognizedGesture gesture);
+        void OnEmotionUpdate(string label, float confidence, string difficultyHint);
     }
 
     public class SkeletonLandmark
@@ -27,5 +28,12 @@ namespace GestureClient
     {
         public string Name { get; set; }
         public double Confidence { get; set; }
+    }
+
+    public class EmotionReading
+    {
+        public string Label { get; set; }
+        public float Confidence { get; set; }
+        public string DifficultyHint { get; set; }
     }
 }

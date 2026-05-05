@@ -130,6 +130,7 @@ namespace GestureClient
                     double timestamp = msg.ContainsKey("timestamp") ? Convert.ToDouble(msg["timestamp"]) : 0;
                     var skeleton = ParseSkeleton(msg);
                     var gesture = ParseGesture(msg);
+                    var emotion = ParseEmotion(msg);
 
                     lock (listenerLock)
                     {
@@ -141,6 +142,8 @@ namespace GestureClient
                                     l.OnSkeletonUpdate(timestamp, skeleton);
                                 if (gesture != null)
                                     l.OnGestureRecognized(timestamp, gesture);
+                                if (emotion != null)
+                                    l.OnEmotionUpdate(emotion.Label, (float)emotion.Confidence, emotion.DifficultyHint);
                             }
                             catch (Exception ex)
                             {
@@ -269,6 +272,19 @@ namespace GestureClient
             {
                 Name = GetString(dict, "name"),
                 Confidence = GetDouble(dict, "confidence")
+            };
+        }
+
+        private EmotionReading ParseEmotion(Dictionary<string, object> msg)
+        {
+            if (!msg.ContainsKey("emotion") || msg["emotion"] == null) return null;
+            var dict = msg["emotion"] as Dictionary<string, object>;
+            if (dict == null) return null;
+            return new EmotionReading
+            {
+                Label = GetString(dict, "label"),
+                Confidence = (float)GetDouble(dict, "confidence"),
+                DifficultyHint = GetString(dict, "difficulty_hint")
             };
         }
 
