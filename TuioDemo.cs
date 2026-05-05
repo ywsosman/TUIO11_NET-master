@@ -56,7 +56,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         public float Y;
     }
     private readonly Dictionary<long, VisualState> visualStates = new Dictionary<long, VisualState>();
-    private readonly Timer animationTimer = new Timer();
+    private readonly System.Windows.Forms.Timer animationTimer = new System.Windows.Forms.Timer();
     private readonly Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
     private readonly Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(128);
     private readonly Dictionary<int, Image> fruitImages = new Dictionary<int, Image>();
@@ -86,7 +86,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     private readonly SolidBrush whiteBrush = new SolidBrush(Color.White);
     private readonly SolidBrush darkOverlayBrush = new SolidBrush(Color.FromArgb(140, 0, 0, 0));
     private readonly Font radialFont = new Font("Arial", 14.0f, FontStyle.Bold);
-    private readonly Timer radialTimer = new Timer();
+    private readonly System.Windows.Forms.Timer radialTimer = new System.Windows.Forms.Timer();
     private readonly Dictionary<int, string> fruitNames = new Dictionary<int, string>();
     private readonly Dictionary<int, string> fruitColors = new Dictionary<int, string>();
     private readonly Dictionary<int, string> fruitBenefits = new Dictionary<int, string>();
