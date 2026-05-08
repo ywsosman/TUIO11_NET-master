@@ -645,7 +645,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         int score = CalculateLearningRate(CurrentLevel.Targets.Count, elapsedSeconds);
         levelScores.Add(score);
 
-        KidPopup.Show("Great job!", CurrentLevel.Name + " completed!\n\nTime: " + elapsedSeconds.ToString("0.0") + " sec\nLearning rate: " + score + "%");
+        KidPopup.Show(this.client, "Great job!", CurrentLevel.Name + " completed!\n\nTime: " + elapsedSeconds.ToString("0.0") + " sec\nLearning rate: " + score + "%");
 
         int nextLevel = currentLevelIndex + 1;
         if (nextLevel < levels.Count)
@@ -658,7 +658,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         if (levelScores.Count > 0)
             average = (int)Math.Round(levelScores.Average());
             
-        KidPopup.Show("You're a Star!", "All levels completed!\nAverage learning rate: " + average + "%\n\nGame will restart from Level 1.");
+        KidPopup.Show(this.client, "You're a Star!", "All levels completed!\nAverage learning rate: " + average + "%\n\nGame will restart from Level 1.");
 
         levelScores.Clear();
         StartLevel(0);
@@ -2089,14 +2089,21 @@ public class TuioDemo : Form, TuioListener, IGestureListener
 }
 
 // Custom kid-friendly popup to replace boring MessageBox
-public class KidPopup : Form
+public class KidPopup : Form, TuioListener
 {
     private Label lblTitle;
     private Label lblMessage;
     private Button btnOk;
+    private TuioClient _client;
 
-    public KidPopup(string title, string message)
+    public KidPopup(TuioClient client, string title, string message)
     {
+        _client = client;
+        if (_client != null)
+        {
+            _client.addTuioListener(this);
+        }
+
         this.FormBorderStyle = FormBorderStyle.None;
         this.ClientSize = new Size(400, 250);
         this.StartPosition = FormStartPosition.CenterScreen;
@@ -2114,7 +2121,7 @@ public class KidPopup : Form
         lblTitle.Location = new Point(0, 20);
 
         lblMessage = new Label();
-        lblMessage.Text = message;
+        lblMessage.Text = message + "\n\n(Scan any marker to continue)";
         lblMessage.Font = new Font("Comic Sans MS", 12F, FontStyle.Bold);
         lblMessage.ForeColor = Color.DarkSlateGray;
         lblMessage.BackColor = Color.Transparent;
@@ -2134,11 +2141,43 @@ public class KidPopup : Form
         btnOk.Location = new Point(100, 180);
         btnOk.Cursor = Cursors.Hand;
         btnOk.Click += (s, e) => this.Close();
+        
+        // Hide button since we want marker scan only
+        btnOk.Visible = false;
 
         this.Controls.Add(lblTitle);
         this.Controls.Add(lblMessage);
         this.Controls.Add(btnOk);
     }
+    
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        if (_client != null)
+        {
+            _client.removeTuioListener(this);
+        }
+        base.OnFormClosed(e);
+    }
+
+    public void addTuioObject(TuioObject tobj)
+    {
+        if (this.IsHandleCreated && !this.IsDisposed)
+        {
+            this.Invoke((MethodInvoker)delegate {
+                this.Close();
+            });
+        }
+    }
+
+    public void updateTuioObject(TuioObject tobj) { }
+    public void removeTuioObject(TuioObject tobj) { }
+    public void addTuioCursor(TuioCursor tcur) { }
+    public void updateTuioCursor(TuioCursor tcur) { }
+    public void removeTuioCursor(TuioCursor tcur) { }
+    public void addTuioBlob(TuioBlob tblb) { }
+    public void updateTuioBlob(TuioBlob tblb) { }
+    public void removeTuioBlob(TuioBlob tblb) { }
+    public void refresh(TuioTime frameTime) { }
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -2172,9 +2211,9 @@ public class KidPopup : Form
         }
     }
 
-    public static void Show(string title, string message)
+    public static void Show(TuioClient client, string title, string message)
     {
-        using (var form = new KidPopup(title, message))
+        using (var form = new KidPopup(client, title, message))
         {
             form.ShowDialog();
         }
