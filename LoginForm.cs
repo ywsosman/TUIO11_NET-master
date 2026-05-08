@@ -30,6 +30,25 @@ public class LoginForm : Form, TuioListener
         
         client = new TuioClient(port);
         client.addTuioListener(this);
+
+        // Auto-start scanning and gesture mode
+        UseRadialGestureMode = true;
+        isScanning = true;
+        
+        btnScan.Visible = false;
+        btnRadialGesture.Visible = false;
+        
+        labelStatus.Text = "Please show your marker to the camera!";
+        labelStatus.Font = new Font("Comic Sans MS", 16F, FontStyle.Bold);
+        labelStatus.Size = new Size(500, 40);
+        labelStatus.Location = new Point(0, 150);
+
+        try 
+        {
+            if (!client.isConnected())
+                client.connect();
+        } 
+        catch { }
     }
 
     private void InitializeComponent()
@@ -209,7 +228,7 @@ public class LoginForm : Form, TuioListener
         if (isScanning && tobj.SymbolID >= 0 && tobj.SymbolID <= 7)
         {
             this.Invoke((MethodInvoker)delegate {
-                btnScan.Text = "Logged in! Let's play!";
+                labelStatus.Text = "Logged in! Let's play!";
                 isScanning = false;
                 client.removeTuioListener(this);
                 client.disconnect();
@@ -221,7 +240,7 @@ public class LoginForm : Form, TuioListener
         else if (isScanning)
         {
             this.Invoke((MethodInvoker)delegate {
-                btnScan.Text = "Hmm, I don't recognize that marker. Try another!";
+                labelStatus.Text = "Hmm, I don't recognize that marker. Try another!";
             });
         }
     }
