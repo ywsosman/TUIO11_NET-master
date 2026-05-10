@@ -2,8 +2,8 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
-using TUIO;
 using GestureClient;
+using TUIO;
 
 public class LoginForm : Form, TuioListener
 {
@@ -12,10 +12,11 @@ public class LoginForm : Form, TuioListener
     private RoundedButton btnRadialGesture;
     private Label labelTitle;
     private Label labelStatus;
+    private Label label1;
     private Button btnClose;
     private bool isScanning = false;
     private int port;
-
+    private RoundedButton btnAdminPanel;
     // For dragging the frameless window
     private bool dragging = false;
     private Point dragCursorPoint;
@@ -27,10 +28,11 @@ public class LoginForm : Form, TuioListener
     {
         this.port = port;
         InitializeComponent();
-        
+
         client = new TuioClient(port);
         client.addTuioListener(this);
 
+<<<<<<< Updated upstream
         // Auto-start scanning and gesture mode
         UseRadialGestureMode = true;
         isScanning = true;
@@ -49,95 +51,88 @@ public class LoginForm : Form, TuioListener
                 client.connect();
         } 
         catch { }
+=======
+
+>>>>>>> Stashed changes
     }
 
     private void InitializeComponent()
     {
-        this.btnScan = new RoundedButton();
-        this.btnRadialGesture = new RoundedButton();
-        this.labelTitle = new Label();
-        this.labelStatus = new Label();
-        this.btnClose = new Button();
-        this.SuspendLayout();
+            this.label1 = new System.Windows.Forms.Label();
+            this.btnRadialGesture = new RoundedButton();
+            this.btnScan = new RoundedButton();
+            this.btnAdminPanel = new RoundedButton();
+            this.SuspendLayout();
+            // 
+            // label1
+            // 
+            this.label1.BackColor = System.Drawing.Color.Transparent;
+            this.label1.Cursor = System.Windows.Forms.Cursors.Hand;
+            this.label1.Font = new System.Drawing.Font("Arial", 7F, System.Drawing.FontStyle.Bold);
+            this.label1.ForeColor = System.Drawing.Color.White;
+            this.label1.Location = new System.Drawing.Point(152, 217);
+            this.label1.Name = "label1";
+            this.label1.Size = new System.Drawing.Size(134, 50);
+            this.label1.TabIndex = 2;
+            this.label1.Text = "Don\'t have an account? Sign up";
+            this.label1.TextAlign = System.Drawing.ContentAlignment.MiddleCenter;
+            // 
+            // btnRadialGesture
+            // 
+            this.btnRadialGesture.BackColor = System.Drawing.Color.Transparent;
+            this.btnRadialGesture.ButtonColor = System.Drawing.Color.DodgerBlue;
+            this.btnRadialGesture.Cursor = System.Windows.Forms.Cursors.Hand;
+            this.btnRadialGesture.HoverColor = System.Drawing.Color.DeepSkyBlue;
+            this.btnRadialGesture.Location = new System.Drawing.Point(125, 150);
+            this.btnRadialGesture.Name = "btnRadialGesture";
+            this.btnRadialGesture.Size = new System.Drawing.Size(200, 50);
+            this.btnRadialGesture.TabIndex = 1;
+            this.btnRadialGesture.Text = "Radial Menu (Gesture)";
+            this.btnRadialGesture.Click += new System.EventHandler(this.btnRadialGesture_Click);
+            // 
+            // btnScan
+            // 
+            this.btnScan.BackColor = System.Drawing.Color.Transparent;
+            this.btnScan.BackgroundImageLayout = System.Windows.Forms.ImageLayout.Center;
+            this.btnScan.ButtonColor = System.Drawing.Color.DodgerBlue;
+            this.btnScan.Cursor = System.Windows.Forms.Cursors.Hand;
+            this.btnScan.HoverColor = System.Drawing.Color.DeepSkyBlue;
+            this.btnScan.Location = new System.Drawing.Point(125, 90);
+            this.btnScan.Name = "btnScan";
+            this.btnScan.Size = new System.Drawing.Size(200, 50);
+            this.btnScan.TabIndex = 0;
+            this.btnScan.Text = "Scan to Login";
+            this.btnScan.Click += new System.EventHandler(this.btnScan_Click);
+            // 
+            // btnAdminPanel
+            // 
+            this.btnAdminPanel.BackColor = System.Drawing.Color.Transparent;
+            this.btnAdminPanel.ButtonColor = System.Drawing.Color.DodgerBlue;
+            this.btnAdminPanel.Cursor = System.Windows.Forms.Cursors.Hand;
+            this.btnAdminPanel.HoverColor = System.Drawing.Color.DeepSkyBlue;
+            this.btnAdminPanel.Location = new System.Drawing.Point(125, 270);
+            this.btnAdminPanel.Name = "btnAdminPanel";
+            this.btnAdminPanel.Size = new System.Drawing.Size(200, 30);
+            this.btnAdminPanel.TabIndex = 3;
+            this.btnAdminPanel.Text = "Admin Panel";
+            this.btnAdminPanel.Click += new System.EventHandler(this.btnAdminPanel_Click);
+            // 
+            // LoginForm
+            // 
+            this.ClientSize = new System.Drawing.Size(450, 340);
+            this.Controls.Add(this.label1);
+            this.Controls.Add(this.btnRadialGesture);
+            this.Controls.Add(this.btnScan);
+            this.Controls.Add(this.btnAdminPanel);
+            this.Name = "LoginForm";
+            this.Text = "Login";
+            this.ResumeLayout(false);
 
-        // Form settings
-        this.FormBorderStyle = FormBorderStyle.None;
-        this.ClientSize = new Size(500, 320);
-        this.StartPosition = FormStartPosition.CenterScreen;
-        this.BackColor = Color.White;
-        this.DoubleBuffered = true;
-
-        // Window dragging events
-        this.MouseDown += LoginForm_MouseDown;
-        this.MouseMove += LoginForm_MouseMove;
-        this.MouseUp += LoginForm_MouseUp;
-
-        // Custom Close Button
-        this.btnClose.Text = "X";
-        this.btnClose.Font = new Font("Comic Sans MS", 14F, FontStyle.Bold);
-        this.btnClose.ForeColor = Color.White;
-        this.btnClose.BackColor = Color.FromArgb(255, 80, 80);
-        this.btnClose.FlatStyle = FlatStyle.Flat;
-        this.btnClose.FlatAppearance.BorderSize = 0;
-        this.btnClose.Size = new Size(40, 40);
-        this.btnClose.Location = new Point(455, 5); // 500 - 45
-        this.btnClose.Cursor = Cursors.Hand;
-        this.btnClose.Click += (s, e) => { this.DialogResult = DialogResult.Cancel; this.Close(); };
-
-        // Title Label
-        this.labelTitle.Text = "Welcome to Fruit Learning!";
-        this.labelTitle.Font = new Font("Comic Sans MS", 18F, FontStyle.Bold);
-        this.labelTitle.ForeColor = Color.White;
-        this.labelTitle.BackColor = Color.Transparent;
-        this.labelTitle.AutoSize = false;
-        this.labelTitle.Size = new Size(500, 40);
-        this.labelTitle.TextAlign = ContentAlignment.MiddleCenter;
-        this.labelTitle.Location = new Point(0, 30);
-        this.labelTitle.MouseDown += LoginForm_MouseDown; // Allow dragging by title
-        this.labelTitle.MouseMove += LoginForm_MouseMove;
-
-        // Status Label
-        this.labelStatus.Text = "Select how you want to play today!";
-        this.labelStatus.Font = new Font("Comic Sans MS", 12F);
-        this.labelStatus.ForeColor = Color.White;
-        this.labelStatus.BackColor = Color.Transparent;
-        this.labelStatus.AutoSize = false;
-        this.labelStatus.Size = new Size(500, 30);
-        this.labelStatus.TextAlign = ContentAlignment.MiddleCenter;
-        this.labelStatus.Location = new Point(0, 75);
-
-        // btnScan
-        this.btnScan.Location = new Point(60, 140);
-        this.btnScan.Name = "btnScan";
-        this.btnScan.Size = new Size(380, 60);
-        this.btnScan.TabIndex = 0;
-        this.btnScan.Text = "Scan Marker to Login";
-        this.btnScan.Font = new Font("Comic Sans MS", 14F, FontStyle.Bold);
-        this.btnScan.ButtonColor = Color.FromArgb(100, 200, 100); // Kid friendly green
-        this.btnScan.HoverColor = Color.FromArgb(120, 220, 120);
-        this.btnScan.Click += new EventHandler(this.btnScan_Click);
-
-        // btnRadialGesture
-        this.btnRadialGesture.Location = new Point(60, 220);
-        this.btnRadialGesture.Name = "btnRadialGesture";
-        this.btnRadialGesture.Size = new Size(380, 60);
-        this.btnRadialGesture.TabIndex = 1;
-        this.btnRadialGesture.Text = "Play with Magic Hands";
-        this.btnRadialGesture.Font = new Font("Comic Sans MS", 14F, FontStyle.Bold);
-        this.btnRadialGesture.ButtonColor = Color.FromArgb(255, 160, 60); // Friendly orange
-        this.btnRadialGesture.HoverColor = Color.FromArgb(255, 180, 80);
-        this.btnRadialGesture.Click += new EventHandler(this.btnRadialGesture_Click);
-
-        // Add controls
-        this.Controls.Add(this.btnClose);
-        this.Controls.Add(this.labelTitle);
-        this.Controls.Add(this.labelStatus);
-        this.Controls.Add(this.btnRadialGesture);
-        this.Controls.Add(this.btnScan);
-        this.ResumeLayout(false);
-        this.PerformLayout();
     }
 
+    
+
+    
     protected override void OnPaint(PaintEventArgs e)
     {
         base.OnPaint(e);
@@ -206,6 +201,11 @@ public class LoginForm : Form, TuioListener
             MessageBox.Show("Could not connect to the Magic Hands server!\nMake sure 'python gesture_server.py' is running.", "Oops!", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
+    private void btnAdminPanel_Click(object sender, EventArgs e)
+    {
+        var adminForm = new AdminPanelForm();
+        adminForm.Show();
+    }
 
     private void btnScan_Click(object sender, EventArgs e)
     {
@@ -214,7 +214,7 @@ public class LoginForm : Form, TuioListener
             btnScan.Text = "Show marker to camera!";
             isScanning = true;
             btnScan.Enabled = false;
-            
+
             if (!client.isConnected())
             {
                 client.connect();
@@ -227,20 +227,32 @@ public class LoginForm : Form, TuioListener
     {
         if (isScanning && tobj.SymbolID >= 0 && tobj.SymbolID <= 7)
         {
+<<<<<<< Updated upstream
             this.Invoke((MethodInvoker)delegate {
                 labelStatus.Text = "Logged in! Let's play!";
+=======
+            this.Invoke((MethodInvoker)delegate
+            {
+                btnScan.Text = "Logged in! Let's play!";
+>>>>>>> Stashed changes
                 isScanning = false;
                 client.removeTuioListener(this);
                 client.disconnect();
-                
+
                 this.DialogResult = DialogResult.OK;
                 this.Close();
             });
         }
         else if (isScanning)
         {
+<<<<<<< Updated upstream
             this.Invoke((MethodInvoker)delegate {
                 labelStatus.Text = "Hmm, I don't recognize that marker. Try another!";
+=======
+            this.Invoke((MethodInvoker)delegate
+            {
+                btnScan.Text = "Hmm, I don't recognize that marker. Try another!";
+>>>>>>> Stashed changes
             });
         }
     }

@@ -9,12 +9,14 @@ using System.Windows.Forms;
 using TUIO;
 using GestureClient;
 
-public class TuioDemo : Form, TuioListener, IGestureListener
-{
+namespace TuioDemoApp
+{ 
+  public class TuioDemo : Form, TuioListener, IGestureListener
+  {
     private class TargetSlot
     {
         public int SymbolId;
-        public string FruitName;
+        public string ObjectName;
         public float XNormalized;
         public float YNormalized;
         public float WidthNormalized;
@@ -59,8 +61,8 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     private readonly System.Windows.Forms.Timer animationTimer = new System.Windows.Forms.Timer();
     private readonly Dictionary<long, TuioCursor> cursorList = new Dictionary<long, TuioCursor>(128);
     private readonly Dictionary<long, TuioBlob> blobList = new Dictionary<long, TuioBlob>(128);
-    private readonly Dictionary<int, Image> fruitImages = new Dictionary<int, Image>();
-    private readonly Dictionary<int, Image> fruitImagesAlt = new Dictionary<int, Image>();
+    private readonly Dictionary<int, Image> objectImages = new Dictionary<int, Image>();
+    private readonly Dictionary<int, Image> objectImagesAlt = new Dictionary<int, Image>();
     private readonly Dictionary<string, Image> boardImages = new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
     private readonly List<LevelDefinition> levels = new List<LevelDefinition>();
     private readonly List<int> levelScores = new List<int>();
@@ -79,7 +81,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     private int currentLevelIndex;
     private DateTime levelStartTime;
     private Image fallbackBackground;
-    private dynamic fruitPlayer;
+    private dynamic objectPlayer;
 
     private readonly Font smallFont = new Font("Arial", 12.0f, FontStyle.Bold);
     private readonly Font titleFont = new Font("Arial", 22.0f, FontStyle.Bold);
@@ -87,10 +89,10 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     private readonly SolidBrush darkOverlayBrush = new SolidBrush(Color.FromArgb(140, 0, 0, 0));
     private readonly Font radialFont = new Font("Arial", 14.0f, FontStyle.Bold);
     private readonly System.Windows.Forms.Timer radialTimer = new System.Windows.Forms.Timer();
-    private readonly Dictionary<int, string> fruitNames = new Dictionary<int, string>();
-    private readonly Dictionary<int, string> fruitColors = new Dictionary<int, string>();
-    private readonly Dictionary<int, string> fruitBenefits = new Dictionary<int, string>();
-    private readonly Dictionary<int, string> fruitColorAudio = new Dictionary<int, string>();
+    private readonly Dictionary<int, string> objectNames = new Dictionary<int, string>();
+    private readonly Dictionary<int, string> objectColors = new Dictionary<int, string>();
+    private readonly Dictionary<int, string> objectBenefits = new Dictionary<int, string>();
+    private readonly Dictionary<int, string> objectColorAudio = new Dictionary<int, string>();
     private readonly List<string> radialLabels = new List<string>();
     private SpeechSynthesizer speech;
     private bool radialMenuOpen;
@@ -128,7 +130,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         WindowState = FormWindowState.Maximized;
 
         Name = "TuioDemo";
-        Text = "Fruit Learning Game";
+        Text = "Object Learning Game";
 
         Button btnClose = new Button();
         btnClose.Text = "X";
@@ -159,24 +161,24 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             Type wmpType = Type.GetTypeFromProgID("WMPlayer.OCX.7");
             if (wmpType != null)
             {
-                fruitPlayer = Activator.CreateInstance(wmpType);
-                fruitPlayer.settings.autoStart = false;
+                objectPlayer = Activator.CreateInstance(wmpType);
+                objectPlayer.settings.autoStart = false;
             }
         }
         catch
         {
-            fruitPlayer = null;
+            objectPlayer = null;
         }
 
         LoadAssets();
-        BuildRadialFruitData();
+        BuildRadialObjectData();
         InitializeRadialSpeech();
         BuildLevels();
         StartLevel(0);
         InitializeRadialMenu();
         InitializeBluetoothPairing();
 
-        // ── TUIO markers (always active – handles fruit placement) ────────────
+        // ── TUIO markers (always active – handles object placement) ────────────
         client = new TuioClient(port);
         client.addTuioListener(this);
         client.connect();
@@ -296,25 +298,26 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     {
         levels.Clear();
 
+
         var level1 = new LevelDefinition
         {
             Name = "Level 1",
             BoardImageName = "level 1.png"
         };
 
-        level1.Targets.Add(new TargetSlot { SymbolId = 0, FruitName = "Apple", XNormalized = 0.23f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
-        level1.Targets.Add(new TargetSlot { SymbolId = 1, FruitName = "Banana", XNormalized = 0.75f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
+        level1.Targets.Add(new TargetSlot { SymbolId = 0, ObjectName = "Apple", XNormalized = 0.23f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
+        level1.Targets.Add(new TargetSlot { SymbolId = 1, ObjectName = "Banana", XNormalized = 0.75f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
 
         var level2 = new LevelDefinition
         {
             Name = "Level 2",
             BoardImageName = "level2.png"
         };
-        level2.Targets.Add(new TargetSlot { SymbolId = 2, FruitName = "Strawberry", XNormalized = 0.11f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 3, FruitName = "Watermelon", XNormalized = 0.30f, YNormalized = 0.50f, WidthNormalized = 0.15f, HeightNormalized = 0.21f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 4, FruitName = "Mango", XNormalized = 0.50f, YNormalized = 0.45f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 5, FruitName = "Orange", XNormalized = 0.69f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 6, FruitName = "Kiwi", XNormalized = 0.88f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 2, ObjectName = "Strawberry", XNormalized = 0.11f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 3, ObjectName = "Watermelon", XNormalized = 0.30f, YNormalized = 0.50f, WidthNormalized = 0.15f, HeightNormalized = 0.21f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 4, ObjectName = "Mango", XNormalized = 0.50f, YNormalized = 0.45f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 5, ObjectName = "Orange", XNormalized = 0.69f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 6, ObjectName = "Kiwi", XNormalized = 0.88f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
 
         levels.Add(level1);
         levels.Add(level2);
@@ -352,67 +355,67 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     {
         fallbackBackground = LoadImageByBaseName("background");
 
-        fruitImages[0] = LoadImageByBaseName("apple");
+        objectImages[0] = LoadImageByBaseName("apple");
         {
             var tmp = LoadImageByBaseName("applecut");
             if (tmp != null)
-                fruitImagesAlt[0] = tmp;
+                objectImagesAlt[0] = tmp;
             else
-                fruitImagesAlt[0] = fruitImages[0];
+                objectImagesAlt[0] = objectImages[0];
         }
-        fruitImages[1] = LoadImageByBaseName("banana");
+        objectImages[1] = LoadImageByBaseName("banana");
         {
             var tmp = LoadImageByBaseName("bananacut");
             if (tmp != null)
-                fruitImagesAlt[1] = tmp;
+                objectImagesAlt[1] = tmp;
             else
-                fruitImagesAlt[1] = fruitImages[1];
+                objectImagesAlt[1] = objectImages[1];
         }
-        fruitImages[2] = LoadImageByBaseName("straw");
+        objectImages[2] = LoadImageByBaseName("straw");
         {
             var tmp = LoadImageByBaseName("strawcut");
             if (tmp != null)
-                fruitImagesAlt[2] = tmp;
+                objectImagesAlt[2] = tmp;
             else
-                fruitImagesAlt[2] = fruitImages[2];
+                objectImagesAlt[2] = objectImages[2];
         }
         {
             var tmp = LoadImageByBaseName("watermelonwhole");
             if (tmp != null)
-                fruitImages[3] = tmp;
+                objectImages[3] = tmp;
             else
-                fruitImages[3] = LoadImageByBaseName("watermelon");
+                objectImages[3] = LoadImageByBaseName("watermelon");
         }
         {
             var tmp = LoadImageByBaseName("watermelon");
             if (tmp != null)
-                fruitImagesAlt[3] = tmp;
+                objectImagesAlt[3] = tmp;
             else
-                fruitImagesAlt[3] = fruitImages[3];
+                objectImagesAlt[3] = objectImages[3];
         }
-        fruitImages[4] = LoadImageByBaseName("mango");
+        objectImages[4] = LoadImageByBaseName("mango");
         {
             var tmp = LoadImageByBaseName("mangocut");
             if (tmp != null)
-                fruitImagesAlt[4] = tmp;
+                objectImagesAlt[4] = tmp;
             else
-                fruitImagesAlt[4] = fruitImages[4];
+                objectImagesAlt[4] = objectImages[4];
         }
-        fruitImages[5] = LoadImageByBaseName("Orange");
-        fruitImagesAlt[5] = fruitImages[5];
+        objectImages[5] = LoadImageByBaseName("Orange");
+        objectImagesAlt[5] = objectImages[5];
         {
             var tmp = LoadImageByBaseName("wholekiwi");
             if (tmp != null)
-                fruitImages[6] = tmp;
+                objectImages[6] = tmp;
             else
-                fruitImages[6] = LoadImageByBaseName("kiwi");
+                objectImages[6] = LoadImageByBaseName("kiwi");
         }
         {
             var tmp = LoadImageByBaseName("kiwi");
             if (tmp != null)
-                fruitImagesAlt[6] = tmp;
+                objectImagesAlt[6] = tmp;
             else
-                fruitImagesAlt[6] = fruitImages[6];
+                objectImagesAlt[6] = objectImages[6];
         }
 
         var level1Board = LoadImageByExactName("level 1.png");
@@ -561,7 +564,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             objectList[o.SessionID] = o;
         }
         if (verbose) Console.WriteLine("add obj " + o.SymbolID + " (" + o.SessionID + ")");
-        PlayFruitSound(o.SymbolID);
+        PlayObjectSound(o.SymbolID);
         EvaluateObjectPlacement(o);
     }
 
@@ -664,9 +667,9 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         StartLevel(0);
     }
 
-    private int CalculateLearningRate(int fruitCount, double elapsedSeconds)
+    private int CalculateLearningRate(int objectCount, double elapsedSeconds)
     {
-        double expectedSeconds = fruitCount * 10.0;
+        double expectedSeconds = objectCount * 10.0;
         double safeElapsed = Math.Max(1.0, elapsedSeconds);
         double percentage = (expectedSeconds / safeElapsed) * 100.0;
         if (percentage > 100.0) percentage = 100.0;
@@ -674,7 +677,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         return (int)Math.Round(percentage);
     }
 
-    private void PlayFruitSound(int symbolId)
+    private void PlayObjectSound(int symbolId)
     {
         string soundFile;
         switch (symbolId)
@@ -690,13 +693,13 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         }
 
         string fullPath = GetAssetsPath(soundFile);
-        if (string.IsNullOrEmpty(fullPath) || fruitPlayer == null) return;
+        if (string.IsNullOrEmpty(fullPath) || objectPlayer == null) return;
 
         try
         {
-            fruitPlayer.controls.stop();
-            fruitPlayer.URL = fullPath;
-            fruitPlayer.controls.play();
+            objectPlayer.controls.stop();
+            objectPlayer.URL = fullPath;
+            objectPlayer.controls.play();
         }
         catch
         {
@@ -765,7 +768,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         height = this.ClientSize.Height;
 
         DrawTargetZones(g);
-        DrawPlacedFruits(g);
+        DrawPlacedObjects(g);
         DrawObjects(g);
 
         g.Restore(state);
@@ -965,39 +968,39 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         }
     }
 
-    private void BuildRadialFruitData()
+    private void BuildRadialObjectData()
     {
-        fruitNames[0] = "Apple";
-        fruitNames[1] = "Banana";
-        fruitNames[2] = "Strawberry";
-        fruitNames[3] = "Watermelon";
-        fruitNames[4] = "Mango";
-        fruitNames[5] = "Orange";
-        fruitNames[6] = "Kiwi";
+        objectNames[0] = "Apple";
+        objectNames[1] = "Banana";
+        objectNames[2] = "Strawberry";
+        objectNames[3] = "Watermelon";
+        objectNames[4] = "Mango";
+        objectNames[5] = "Orange";
+        objectNames[6] = "Kiwi";
 
-        fruitColors[0] = "Red";
-        fruitColors[1] = "Yellow";
-        fruitColors[2] = "Red";
-        fruitColors[3] = "Green";
-        fruitColors[4] = "Orange";
-        fruitColors[5] = "Orange";
-        fruitColors[6] = "Green";
+        objectColors[0] = "Red";
+        objectColors[1] = "Yellow";
+        objectColors[2] = "Red";
+        objectColors[3] = "Green";
+        objectColors[4] = "Orange";
+        objectColors[5] = "Orange";
+        objectColors[6] = "Green";
 
-        fruitBenefits[0] = "Apple helps keep you healthy.";
-        fruitBenefits[1] = "Banana gives you energy.";
-        fruitBenefits[2] = "Strawberry helps your skin stay healthy.";
-        fruitBenefits[3] = "Watermelon helps you stay hydrated.";
-        fruitBenefits[4] = "Mango helps your eyes stay strong.";
-        fruitBenefits[5] = "Orange helps your body fight colds.";
-        fruitBenefits[6] = "Kiwi helps your tummy feel happy.";
+        objectBenefits[0] = "Apple helps keep you healthy.";
+        objectBenefits[1] = "Banana gives you energy.";
+        objectBenefits[2] = "Strawberry helps your skin stay healthy.";
+        objectBenefits[3] = "Watermelon helps you stay hydrated.";
+        objectBenefits[4] = "Mango helps your eyes stay strong.";
+        objectBenefits[5] = "Orange helps your body fight colds.";
+        objectBenefits[6] = "Kiwi helps your tummy feel happy.";
 
-        fruitColorAudio[0] = "apple_color.mp3";
-        fruitColorAudio[1] = "banana_color.mp3";
-        fruitColorAudio[2] = "straw_color.mp3";
-        fruitColorAudio[3] = "waterm_color.mp3";
-        fruitColorAudio[4] = "mango_color.mp3";
-        fruitColorAudio[5] = "orange_color.mp3";
-        fruitColorAudio[6] = "kiwi_color.mp3";
+        objectColorAudio[0] = "apple_color.mp3";
+        objectColorAudio[1] = "banana_color.mp3";
+        objectColorAudio[2] = "straw_color.mp3";
+        objectColorAudio[3] = "waterm_color.mp3";
+        objectColorAudio[4] = "mango_color.mp3";
+        objectColorAudio[5] = "orange_color.mp3";
+        objectColorAudio[6] = "kiwi_color.mp3";
     }
 
     private void InitializeRadialSpeech()
@@ -1149,11 +1152,11 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     {
         try
         {
-            if (fruitPlayer == null)
+            if (objectPlayer == null)
             {
                 return false;
             }
-            int state = (int)fruitPlayer.playState;
+            int state = (int)objectPlayer.playState;
             if (state == 3)
             {
                 return true;
@@ -1174,7 +1177,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         }
     }
 
-    private HashSet<int> GetActiveFruitIds()
+    private HashSet<int> GetActiveObjectIds()
     {
         HashSet<int> ids = new HashSet<int>();
         if (CurrentLevel == null)
@@ -1189,9 +1192,9 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         return ids;
     }
 
-    private List<int> GetSortedActiveFruitIds()
+    private List<int> GetSortedActiveObjectIds()
     {
-        var ids = GetActiveFruitIds().ToList();
+        var ids = GetActiveObjectIds().ToList();
         ids.Sort();
         return ids;
     }
@@ -1228,15 +1231,15 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         Invalidate();
     }
 
-    private void BuildRadialLayer2Fruits()
+    private void BuildRadialLayer2Objects()
     {
         radialLabels.Clear();
         radialLabels.Add("Back");
-        foreach (int id in GetSortedActiveFruitIds())
+        foreach (int id in GetSortedActiveObjectIds())
         {
-            if (fruitNames.ContainsKey(id))
+            if (objectNames.ContainsKey(id))
             {
-                radialLabels.Add(fruitNames[id]);
+                radialLabels.Add(objectNames[id]);
             }
         }
     }
@@ -1279,14 +1282,14 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             {
                 radialLayer = "layer2";
                 radialSubMode = "colors";
-                BuildRadialLayer2Fruits();
+                BuildRadialLayer2Objects();
                 return;
             }
             if (label == "Info")
             {
                 radialLayer = "layer2";
                 radialSubMode = "info";
-                BuildRadialLayer2Fruits();
+                BuildRadialLayer2Objects();
                 return;
             }
             if (label == "Level Control")
@@ -1344,15 +1347,15 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             return;
         }
 
-        foreach (int id in GetSortedActiveFruitIds())
+        foreach (int id in GetSortedActiveObjectIds())
         {
-            if (!fruitNames.ContainsKey(id))
+            if (!objectNames.ContainsKey(id))
             {
                 continue;
             }
-            if (fruitNames[id] == label)
+            if (objectNames[id] == label)
             {
-                PlayFruitColorAudio(id);
+                PlayObjectColorAudio(id);
                 return;
             }
         }
@@ -1366,17 +1369,17 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             return;
         }
 
-        foreach (int id in GetSortedActiveFruitIds())
+        foreach (int id in GetSortedActiveObjectIds())
         {
-            if (!fruitNames.ContainsKey(id))
+            if (!objectNames.ContainsKey(id))
             {
                 continue;
             }
-            if (fruitNames[id] == label)
+            if (objectNames[id] == label)
             {
-                if (fruitBenefits.ContainsKey(id))
+                if (objectBenefits.ContainsKey(id))
                 {
-                    SpeakSentence(fruitBenefits[id]);
+                    SpeakSentence(objectBenefits[id]);
                 }
                 return;
             }
@@ -1440,9 +1443,9 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     {
         try
         {
-            if (fruitPlayer != null)
+            if (objectPlayer != null)
             {
-                fruitPlayer.controls.stop();
+                objectPlayer.controls.stop();
             }
         }
         catch
@@ -1463,33 +1466,33 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         }
     }
 
-    private void PlayFruitColorAudio(int fruitId)
+    private void PlayObjectColorAudio(int objectId)
     {
         if (radialMuted)
         {
             return;
         }
-        if (!fruitColorAudio.ContainsKey(fruitId))
+        if (!objectColorAudio.ContainsKey(objectId))
         {
             return;
         }
 
-        string mp3Name = fruitColorAudio[fruitId];
+        string mp3Name = objectColorAudio[objectId];
         string fullPath = GetAssetsPath(mp3Name);
         if (string.IsNullOrEmpty(fullPath))
         {
             return;
         }
-        if (fruitPlayer == null)
+        if (objectPlayer == null)
         {
             return;
         }
 
         try
         {
-            fruitPlayer.controls.stop();
-            fruitPlayer.URL = fullPath;
-            fruitPlayer.controls.play();
+            objectPlayer.controls.stop();
+            objectPlayer.URL = fullPath;
+            objectPlayer.controls.play();
             lastAudioKind = "mp3";
             lastMp3Path = fullPath;
             lastSpokenSentence = "";
@@ -1550,15 +1553,15 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             {
                 return;
             }
-            if (fruitPlayer == null)
+            if (objectPlayer == null)
             {
                 return;
             }
             try
             {
-                fruitPlayer.controls.stop();
-                fruitPlayer.URL = lastMp3Path;
-                fruitPlayer.controls.play();
+                objectPlayer.controls.stop();
+                objectPlayer.URL = lastMp3Path;
+                objectPlayer.controls.play();
             }
             catch
             {
@@ -1750,18 +1753,18 @@ public class TuioDemo : Form, TuioListener, IGestureListener
 
             if (!slot.IsPlaced)
             {
-                // Draw faded ghost image of the fruit!
-                Image fruitImg = null;
-                if ((slot.SymbolId == 3 || slot.SymbolId == 6) && fruitImagesAlt.ContainsKey(slot.SymbolId))
+                // Draw faded ghost image of the object!
+                Image objectImg = null;
+                if ((slot.SymbolId == 3 || slot.SymbolId == 6) && objectImagesAlt.ContainsKey(slot.SymbolId))
                 {
-                    fruitImg = fruitImagesAlt[slot.SymbolId];
+                    objectImg = objectImagesAlt[slot.SymbolId];
                 }
-                else if (fruitImages.ContainsKey(slot.SymbolId))
+                else if (objectImages.ContainsKey(slot.SymbolId))
                 {
-                    fruitImg = fruitImages[slot.SymbolId];
+                    objectImg = objectImages[slot.SymbolId];
                 }
                 
-                if (fruitImg != null)
+                if (objectImg != null)
                 {
                     System.Drawing.Imaging.ImageAttributes attrs = new System.Drawing.Imaging.ImageAttributes();
                     System.Drawing.Imaging.ColorMatrix matrix = new System.Drawing.Imaging.ColorMatrix();
@@ -1771,7 +1774,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
                     matrix.Matrix33 = 0.4f; // 40% alpha
                     attrs.SetColorMatrix(matrix);
                     
-                    g.DrawImage(fruitImg, drawRect, 0, 0, fruitImg.Width, fruitImg.Height, GraphicsUnit.Pixel, attrs);
+                    g.DrawImage(objectImg, drawRect, 0, 0, objectImg.Width, objectImg.Height, GraphicsUnit.Pixel, attrs);
                 }
 
                 if (currentDifficultyHint == "easier")
@@ -1804,7 +1807,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             } // End if !slot.IsPlaced
 
             string checkSuffix = slot.IsPlaced ? " ✓" : "";
-            string status = slot.FruitName + checkSuffix;
+            string status = slot.ObjectName + checkSuffix;
             SizeF labelSize = g.MeasureString(status, smallFont);
 
             RectangleF labelBg = new RectangleF(tx - labelSize.Width / 2 - 10, slotRect.Bottom + 8, labelSize.Width + 20, labelSize.Height + 8);
@@ -1817,7 +1820,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         }
     }
 
-    private void DrawPlacedFruits(Graphics g)
+    private void DrawPlacedObjects(Graphics g)
     {
         if (CurrentLevel == null) return;
 
@@ -1827,15 +1830,15 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             Image placedImage;
             if (slot.SymbolId == 3 || slot.SymbolId == 6)
             {
-                if (fruitImagesAlt.ContainsKey(slot.SymbolId))
-                    placedImage = fruitImagesAlt[slot.SymbolId];
+                if (objectImagesAlt.ContainsKey(slot.SymbolId))
+                    placedImage = objectImagesAlt[slot.SymbolId];
                 else
                     placedImage = null;
             }
             else
             {
-                if (fruitImages.ContainsKey(slot.SymbolId))
-                    placedImage = fruitImages[slot.SymbolId];
+                if (objectImages.ContainsKey(slot.SymbolId))
+                    placedImage = objectImages[slot.SymbolId];
                 else
                     placedImage = null;
             }
@@ -1844,7 +1847,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             RectangleF slotRect = GetSlotBounds(slot);
             Rectangle drawRect = Rectangle.Round(slotRect);
 
-            // Draw the colored fruit over the silhouette area once correctly placed.
+            // Draw the colored object over the silhouette area once correctly placed.
             g.DrawImage(placedImage, drawRect);
         }
     }
@@ -1901,13 +1904,13 @@ public class TuioDemo : Form, TuioListener, IGestureListener
                     bool isRotated90 = Math.Abs(Math.Cos(tobj.Angle)) < 0.707;
 
                 Image imgToDraw = null;
-                if (UseAlternateImageForSymbol(tobj.SymbolID, isRotated90) && fruitImagesAlt.ContainsKey(tobj.SymbolID))
+                if (UseAlternateImageForSymbol(tobj.SymbolID, isRotated90) && objectImagesAlt.ContainsKey(tobj.SymbolID))
                 {
-                    imgToDraw = fruitImagesAlt[tobj.SymbolID];
+                    imgToDraw = objectImagesAlt[tobj.SymbolID];
                 }
-                else if (fruitImages.ContainsKey(tobj.SymbolID))
+                else if (objectImages.ContainsKey(tobj.SymbolID))
                 {
-                    imgToDraw = fruitImages[tobj.SymbolID];
+                    imgToDraw = objectImages[tobj.SymbolID];
                 }
 
                 if (imgToDraw != null)
@@ -1930,7 +1933,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
     private bool UseAlternateImageForSymbol(int symbolId, bool isRotated90)
     {
         if (!isRotated90) return false;
-        return fruitImagesAlt.ContainsKey(symbolId) && fruitImages.ContainsKey(symbolId) && fruitImagesAlt[symbolId] != null;
+        return objectImagesAlt.ContainsKey(symbolId) && objectImages.ContainsKey(symbolId) && objectImagesAlt[symbolId] != null;
     }
 
     private bool IsValidPlacementState(int symbolId, bool isRotated90)
@@ -1938,7 +1941,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         // Kiwi (6) and watermelon (3) are valid only in cut/rotated state.
         if (symbolId == 3 || symbolId == 6) return isRotated90;
 
-        // Other fruits must be whole (not rotated to cut state) to be accepted.
+        // Other objects must be whole (not rotated to cut state) to be accepted.
         return !isRotated90;
     }
 
@@ -1952,7 +1955,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
         double elapsed = (DateTime.Now - levelStartTime).TotalSeconds;
 
         string line1 = CurrentLevel.Name + "  |  Stars: " + placedCount + "/" + totalCount;
-        string line2 = "Time: " + elapsed.ToString("0.0") + " sec  |  Place fruits in the matching silhouettes!";
+        string line2 = "Time: " + elapsed.ToString("0.0") + " sec  |  Place objects in the matching silhouettes!";
         string line3 = "Magic Hands: circle=open | square=close | open_hand=select";
 
         // Draw Bubbly HUD
@@ -2058,7 +2061,7 @@ public class TuioDemo : Form, TuioListener, IGestureListener
             this.Invalidate();
         }
     }
-
+    [STAThread]
     public static void Main(string[] argv)
     {
         int port;
@@ -2218,4 +2221,5 @@ public class KidPopup : Form, TuioListener
             form.ShowDialog();
         }
     }
+}
 }
