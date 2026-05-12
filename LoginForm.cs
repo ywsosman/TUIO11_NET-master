@@ -32,7 +32,6 @@ public class LoginForm : Form, TuioListener
         client = new TuioClient(port);
         client.addTuioListener(this);
 
-<<<<<<< Updated upstream
         // Auto-start scanning and gesture mode
         UseRadialGestureMode = true;
         isScanning = true;
@@ -40,10 +39,15 @@ public class LoginForm : Form, TuioListener
         btnScan.Visible = false;
         btnRadialGesture.Visible = false;
         
+        labelStatus = new Label();
+        labelStatus.BackColor = Color.Transparent;
+        labelStatus.ForeColor = Color.White;
+        labelStatus.TextAlign = ContentAlignment.MiddleCenter;
         labelStatus.Text = "Please show your marker to the camera!";
         labelStatus.Font = new Font("Comic Sans MS", 16F, FontStyle.Bold);
-        labelStatus.Size = new Size(500, 40);
+        labelStatus.Size = new Size(450, 40);
         labelStatus.Location = new Point(0, 150);
+        this.Controls.Add(labelStatus);
 
         try 
         {
@@ -51,9 +55,6 @@ public class LoginForm : Form, TuioListener
                 client.connect();
         } 
         catch { }
-=======
-
->>>>>>> Stashed changes
     }
 
     private void InitializeComponent()
@@ -227,14 +228,8 @@ public class LoginForm : Form, TuioListener
     {
         if (isScanning && tobj.SymbolID >= 0 && tobj.SymbolID <= 7)
         {
-<<<<<<< Updated upstream
             this.Invoke((MethodInvoker)delegate {
-                labelStatus.Text = "Logged in! Let's play!";
-=======
-            this.Invoke((MethodInvoker)delegate
-            {
-                btnScan.Text = "Logged in! Let's play!";
->>>>>>> Stashed changes
+                if (labelStatus != null) labelStatus.Text = "Logged in! Let's play!";
                 isScanning = false;
                 client.removeTuioListener(this);
                 client.disconnect();
@@ -245,14 +240,8 @@ public class LoginForm : Form, TuioListener
         }
         else if (isScanning)
         {
-<<<<<<< Updated upstream
             this.Invoke((MethodInvoker)delegate {
-                labelStatus.Text = "Hmm, I don't recognize that marker. Try another!";
-=======
-            this.Invoke((MethodInvoker)delegate
-            {
-                btnScan.Text = "Hmm, I don't recognize that marker. Try another!";
->>>>>>> Stashed changes
+                if (labelStatus != null) labelStatus.Text = "Hmm, I don't recognize that marker. Try another!";
             });
         }
     }
