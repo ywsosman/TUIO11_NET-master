@@ -50,7 +50,7 @@
   </Target>
   -->
   <ItemGroup>
-    <Compile Include="BluetoothTeacherPairingManager.cs" />
+    <Compile Include="BluetoothDevicePairingManager.cs" />
     <Compile Include="Models\Level.cs" />
     <Compile Include="OSC.NET\OSCBundle.cs" />
     <Compile Include="OSC.NET\OSCMessage.cs" />
@@ -104,9 +104,6 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
-    <None Include="Config\teacher_registry.csv">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
     <Content Include="Data\objects.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>

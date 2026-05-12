@@ -110,9 +110,9 @@ namespace TuioDemoApp
     private DateTime radialLastActionAt = DateTime.MinValue;
     private readonly int radialRepeatDelayMs = 250;
     private bool speechIsPlaying;
-    private BluetoothTeacherPairingManager bluetoothPairingManager;
+    private BluetoothDevicePairingManager bluetoothPairingManager;
     private readonly object bluetoothUiSync = new object();
-    private List<PairedTeacherDevice> bluetoothDevices = new List<PairedTeacherDevice>();
+    private List<PairedBluetoothDevice> bluetoothDevices = new List<PairedBluetoothDevice>();
     private string bluetoothStatusMessage = "";
     private DateTime bluetoothStatusAt = DateTime.MinValue;
     private bool bluetoothMenuOpen;
@@ -231,18 +231,13 @@ namespace TuioDemoApp
     {
         if (!radialGestureMode || gesture == null) return;
         string g = gesture.Name.ToLowerInvariant();
-        if (g == "backhand" || g == "back_hand" || g == "back_palm")
+        if (g == "triangle")
         {
             ToggleBluetoothMenu();
             return;
         }
         if (g == "pointer_up")
         {
-            if (!CanTeacherAccessMenus())
-            {
-                UpdateBluetoothStatus("No teacher paired");
-                return;
-            }
             if (!radialMenuOpen)
                 BeginInvoke((MethodInvoker)OpenRadialMenuLayer1);
             return;
@@ -791,7 +786,7 @@ namespace TuioDemoApp
 
     private void InitializeBluetoothPairing()
     {
-        bluetoothPairingManager = new BluetoothTeacherPairingManager();
+        bluetoothPairingManager = new BluetoothDevicePairingManager();
         bluetoothPairingManager.StatusMessage += OnBluetoothStatusMessage;
         bluetoothPairingManager.PairingStateChanged += OnBluetoothPairingStateChanged;
         bluetoothPairingManager.Start();
@@ -802,7 +797,7 @@ namespace TuioDemoApp
         UpdateBluetoothStatus(message);
     }
 
-    private void OnBluetoothPairingStateChanged(List<PairedTeacherDevice> devices)
+    private void OnBluetoothPairingStateChanged(List<PairedBluetoothDevice> devices)
     {
         lock (bluetoothUiSync)
         {
@@ -831,15 +826,6 @@ namespace TuioDemoApp
         }
     }
 
-    private bool CanTeacherAccessMenus()
-    {
-        if (bluetoothPairingManager == null)
-        {
-            return false;
-        }
-        return bluetoothPairingManager.HasAnyConnectedTeacher();
-    }
-
     private void ToggleBluetoothMenu()
     {
         if (!IsHandleCreated || IsDisposed)
@@ -849,14 +835,6 @@ namespace TuioDemoApp
 
         BeginInvoke((MethodInvoker)delegate
         {
-            if (!CanTeacherAccessMenus())
-            {
-                UpdateBluetoothStatus("No teacher paired");
-                bluetoothMenuOpen = true;
-                Invalidate();
-                return;
-            }
-
             bluetoothMenuOpen = !bluetoothMenuOpen;
             Invalidate();
         });
@@ -872,12 +850,12 @@ namespace TuioDemoApp
 
         string statusToDraw = "";
         DateTime statusAtToDraw = DateTime.MinValue;
-        List<PairedTeacherDevice> devicesToDraw = new List<PairedTeacherDevice>();
+        List<PairedBluetoothDevice> devicesToDraw = new List<PairedBluetoothDevice>();
         lock (bluetoothUiSync)
         {
             statusToDraw = bluetoothStatusMessage;
             statusAtToDraw = bluetoothStatusAt;
-            devicesToDraw = new List<PairedTeacherDevice>(bluetoothDevices);
+            devicesToDraw = new List<PairedBluetoothDevice>(bluetoothDevices);
         }
 
         if (!shouldDraw)
@@ -930,35 +908,35 @@ namespace TuioDemoApp
             int index = 0;
             while (index < devicesToDraw.Count)
             {
-                PairedTeacherDevice device = devicesToDraw[index];
+                PairedBluetoothDevice device = devicesToDraw[index];
                 int rowY = startY + (index * rowHeight);
                 if (rowY > panelY + panelHeight - 56)
                 {
                     break;
                 }
 
-                string stateText = "Not Paired";
+                string stateText = "Not connected";
                 SolidBrush stateBrush = disconnectedBrush;
                 if (device.IsConnected)
                 {
-                    stateText = "Paired";
+                    stateText = "Connected";
                     stateBrush = connectedBrush;
                 }
 
-                string teacherName = "Unknown Teacher";
-                if (device.Teacher != null)
+                string line = device.DeviceName;
+                if (string.IsNullOrEmpty(line))
                 {
-                    teacherName = device.Teacher.TeacherName;
+                    line = device.MacKey;
                 }
 
-                g.DrawString(teacherName + " | " + device.DeviceName, lineFont, textBrush, panelX + 12, rowY);
+                g.DrawString(line, lineFont, textBrush, panelX + 12, rowY);
                 g.DrawString(stateText, lineFont, stateBrush, panelX + panelWidth - 90, rowY);
                 index++;
             }
 
             if (devicesToDraw.Count == 0)
             {
-                g.DrawString("No database-registered teachers loaded.", lineFont, disconnectedBrush, panelX + 12, startY);
+                g.DrawString("No Bluetooth devices discovered yet.", lineFont, disconnectedBrush, panelX + 12, startY);
             }
 
             if (!string.IsNullOrEmpty(statusToDraw))
@@ -1956,7 +1934,7 @@ namespace TuioDemoApp
 
         string line1 = CurrentLevel.Name + "  |  Stars: " + placedCount + "/" + totalCount;
         string line2 = "Time: " + elapsed.ToString("0.0") + " sec  |  Place objects in the matching silhouettes!";
-        string line3 = "Magic Hands: circle=open | square=close | open_hand=select";
+        string line3 = "Magic Hands: circle=open | square=close | open_hand=select | triangle=Bluetooth menu";
 
         // Draw Bubbly HUD
         RectangleF hudRect = new RectangleF(15, 15, width - 30, 95);
