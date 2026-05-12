@@ -279,17 +279,20 @@ public class BluetoothDevicePairingManager : IDisposable
         if (!string.IsNullOrWhiteSpace(scanned.DeviceName))
         {
             string trimmed = scanned.DeviceName.Trim();
-            if (trimmed.Length > 0)
+            if (trimmed.Length > 0 && trimmed.ToLowerInvariant() != "unknown")
             {
-                string lower = trimmed.ToLowerInvariant();
-                if (lower != "unknown")
-                {
-                    return trimmed;
-                }
+                return trimmed;
             }
         }
-
-        return FormatMacForDisplay(macKey);
+        // Names are usually missing from BLE advertisements. Keep devices
+        // visually distinct by tagging them with the last 4 hex of the MAC.
+        if (!string.IsNullOrEmpty(macKey))
+        {
+            int len = macKey.Length;
+            string tail = len >= 4 ? macKey.Substring(len - 4) : macKey;
+            return "BLE Tag " + tail;
+        }
+        return "Unknown Device";
     }
 
     private string FormatMacForDisplay(string macKey)

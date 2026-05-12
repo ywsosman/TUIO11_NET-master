@@ -3,12 +3,19 @@ Gesture Server - MediaPipe Hands/Holistic + DollarPy
 Matches mediapipe.ipynb: HandLandmarker, same template format, INDEX_TIP=8
 Uses hand_landmarker.task (hands only) or holistic_landmarker.task (full body)
 Communicates with C# via TCP socket (JSON on port 5000)
+
+Per-frame JSON (type "frame") may include:
+  - "skeleton", "gesture", "emotion", "gaze"
+  - "yolo": optional list of {class, x, y, w, h, conf} (normalized 0-1). Updated on inference
+    throttled by YOLO_INFERENCE_EVERY_FRAMES; last boxes are redrawn each camera frame on the server
+    preview (stable overlay). TuioDemo does not draw boxes. Not written to disk.
 """
 
 import cv2
 import json
 import os
 import socket
+import sys
 import threading
 import time
 from collections import deque
@@ -52,6 +59,10 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 GESTURE_TEMPLATES_DEFAULT = os.path.join(_PROJECT_ROOT, "gesture_templates.json")
 
+# YOLO: inference every N frames (keep N well above ~5 so boxes are not jittery/disappearing every few frames).
+# The OpenCV preview still draws the last boxes every frame via _yolo_overlay_boxes for a steady overlay.
+YOLO_INFERENCE_EVERY_FRAMES = 24
+
 # C# radial menu mapping
 GESTURE_TO_RADIAL = {
     "circle": "pointer_up",
@@ -77,6 +88,16 @@ def get_model_path(filename):
         urllib.request.urlretrieve(urls[filename], path)
         return path
     raise FileNotFoundError(f"Model not found: {filename}")
+
+
+def resolve_yolo_model_path():
+    """Prefer local yolo26m.pt; fall back so YOLO can still run if only small weights exist."""
+    for rel in ("yolo26m.pt", os.path.join("YOLO", "yolo26m.pt")):
+        for base in (_PROJECT_ROOT, _SCRIPT_DIR):
+            p = os.path.join(base, rel)
+            if os.path.isfile(p):
+                return p
+    return None
 
 
 def load_templates(filepath=GESTURE_TEMPLATES_DEFAULT):
@@ -180,6 +201,43 @@ class GestureServer:
             print(f"[Server] FaceEmotionAnalyzer disabled: {e}", flush=True)
             self.face_analyzer = None
 
+        # YOLO — msg["yolo"] only on inference ticks; stable preview uses _yolo_overlay_boxes.
+        self.yolo_model = None
+        try:
+            from ultralytics import YOLO
+
+            weights = resolve_yolo_model_path()
+            if weights:
+                self.yolo_model = YOLO(weights)
+                print(f"[Server] YOLO loaded: {weights} (infer every {YOLO_INFERENCE_EVERY_FRAMES} frames)", flush=True)
+            else:
+                # Ultralytics downloads yolo11n on first use
+                self.yolo_model = YOLO("yolo11n.pt")
+                print(f"[Server] YOLO using yolo11n.pt (infer every {YOLO_INFERENCE_EVERY_FRAMES} frames). Add yolo26m.pt to project root for larger model.", flush=True)
+        except Exception as e:
+            print(f"[Server] YOLO disabled: {e}", flush=True)
+            exe = getattr(sys, "executable", "python")
+            print(f"[Server] This server is using Python: {exe}", flush=True)
+            print(
+                "[Server] Run: "
+                + f'"{exe}" -m pip install ultralytics',
+                flush=True,
+            )
+
+        # Pixel-space boxes redrawn on preview every frame; updated only when YOLO runs.
+        self._yolo_overlay_boxes = []
+
+        # Gaze Tracking
+        try:
+            haar_path = cv2.data.haarcascades
+            self.face_cascade = cv2.CascadeClassifier(os.path.join(haar_path, 'haarcascade_frontalface_default.xml'))
+            self.eye_cascade = cv2.CascadeClassifier(os.path.join(haar_path, 'haarcascade_eye.xml'))
+            self.gaze_enabled = not self.face_cascade.empty() and not self.eye_cascade.empty()
+            print("[Server] Gaze Tracking loaded successfully.", flush=True)
+        except Exception as e:
+            print(f"[Server] Gaze Tracking disabled: {e}", flush=True)
+            self.gaze_enabled = False
+
     def _skeleton_from_hands(self, hand_landmarks, handedness=None):
         """Build cursor skeleton from hand index tips (C# expects right_wrist/left_wrist)."""
         if not hand_landmarks:
@@ -281,7 +339,7 @@ class GestureServer:
                 frame = cv2.flip(frame, 1)
                 rgb = np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 h, w = rgb.shape[:2]
-                msg = {"type": "frame", "timestamp": time.time(), "skeleton": [], "gesture": None, "emotion": None}
+                msg = {"type": "frame", "timestamp": time.time(), "skeleton": [], "gesture": None, "emotion": None, "yolo": [], "gaze": None}
                 display_frame = frame.copy()
 
                 if self.face_analyzer:
@@ -346,12 +404,29 @@ class GestureServer:
                         )
                         x, y = hl[INDEX_TIP].x, hl[INDEX_TIP].y
                         cv2.circle(display_frame, (int(x * w), int(y * h)), 8, (0, 255, 0), -1)
-                    # Use only first hand for gesture stroke (avoid zigzag from 2 hands)
-                    if hand_landmarks and self.recognizer:
+                    # Use only first hand for gesture stroke and pinch detection (avoid zigzag from 2 hands)
+                    if hand_landmarks:
                         hl = hand_landmarks[0]
-                        x, y = hl[INDEX_TIP].x, hl[INDEX_TIP].y
-                        if not self.gesture_points or (x - self.gesture_points[-1][0])**2 + (y - self.gesture_points[-1][1])**2 > 0.00005:
-                            self.gesture_points.append((x, y, 1))
+                        
+                        # Pinch detection for "enter"
+                        x_idx, y_idx = hl[INDEX_TIP].x, hl[INDEX_TIP].y
+                        x_thb, y_thb = hl[THUMB_TIP].x, hl[THUMB_TIP].y
+                        pinch_dist = ((x_idx - x_thb)**2 + (y_idx - y_thb)**2)**0.5
+                        is_pinching = pinch_dist < 0.05
+                        
+                        if is_pinching:
+                            if not getattr(self, "pinch_active", False):
+                                self.pinch_active = True
+                                msg["gesture"] = {"name": "enter", "confidence": 1.0}
+                                print("[Server] Pinch detected -> enter", flush=True)
+                        else:
+                            self.pinch_active = False
+
+                        # Stroke tracking
+                        if self.recognizer:
+                            x, y = hl[INDEX_TIP].x, hl[INDEX_TIP].y
+                            if not self.gesture_points or (x - self.gesture_points[-1][0])**2 + (y - self.gesture_points[-1][1])**2 > 0.00005:
+                                self.gesture_points.append((x, y, 1))
 
                 if msg["skeleton"] and self.recognizer and frame_count % 10 == 0 and len(self.gesture_points) >= 12:
                     gesture = self.try_recognize_gesture()
@@ -360,6 +435,67 @@ class GestureServer:
                         tpl = gesture.get("_template", gesture["name"])
                         print(f"[Server] Matched: {tpl} -> {gesture['name']} (score={gesture['confidence']})", flush=True)
                     self.gesture_points.clear()
+
+                # YOLO (throttled inference; stable boxes on preview via _yolo_overlay_boxes)
+                if self.yolo_model and frame_count % YOLO_INFERENCE_EVERY_FRAMES == 0:
+                    try:
+                        results = self.yolo_model(frame, verbose=False)
+                        overlay = []
+                        if results and len(results) > 0:
+                            boxes = results[0].boxes
+                            if boxes is not None and len(boxes) > 0:
+                                for box in boxes:
+                                    xyxy = box.xyxy[0].cpu().numpy()
+                                    conf = float(box.conf[0])
+                                    cls = int(box.cls[0])
+                                    class_name = results[0].names[cls]
+                                    x1, y1, x2, y2 = map(int, xyxy)
+                                    msg["yolo"].append({"class": class_name, "x": (x1+x2)/2/w, "y": (y1+y2)/2/h, "w": (x2-x1)/w, "h": (y2-y1)/h, "conf": conf})
+                                    overlay.append((x1, y1, x2, y2, class_name, conf))
+                        self._yolo_overlay_boxes = overlay
+                    except Exception as e:
+                        if self._debug:
+                            print(f"[Server] YOLO inference error: {e}", flush=True)
+
+                for x1, y1, x2, y2, cname, yconf in self._yolo_overlay_boxes:
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
+                    lab = f"{cname} {yconf:.2f}"
+                    cv2.putText(
+                        display_frame,
+                        lab,
+                        (x1, max(y1 - 6, 14)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (0, 165, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+
+                # Gaze tracking every 2 frames
+                if self.gaze_enabled and frame_count % 2 == 0:
+                    try:
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        faces = self.face_cascade.detectMultiScale(gray, 1.3, 5)
+                        if len(faces) > 0:
+                            fx, fy, fw, fh = faces[0]
+                            roi = gray[fy:fy+fh, fx:fx+fw]
+                            eyes = self.eye_cascade.detectMultiScale(roi, 1.1, 5)
+                            cx, cy = 0, 0
+                            if len(eyes) >= 2:
+                                ex1, ey1, ew1, eh1 = eyes[0]
+                                ex2, ey2, ew2, eh2 = eyes[1]
+                                cx = fx + (ex1 + ew1//2 + ex2 + ew2//2) // 2
+                                cy = fy + (ey1 + eh1//2 + ey2 + eh2//2) // 2
+                            elif len(eyes) == 1:
+                                ex, ey, ew, eh = eyes[0]
+                                cx = fx + ex + ew//2
+                                cy = fy + ey + eh//2
+                            if cx > 0 and cy > 0:
+                                msg["gaze"] = {"x": cx / w, "y": cy / h}
+                                cv2.circle(display_frame, (cx, cy), 15, (255, 255, 0), 2)
+                                cv2.putText(display_frame, "Gaze", (cx-20, cy-20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                    except Exception as e:
+                        pass
 
                 status = "Tracking" if msg["skeleton"] else "Move into frame..."
                 cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)

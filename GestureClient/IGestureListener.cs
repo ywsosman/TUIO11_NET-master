@@ -12,6 +12,8 @@ namespace GestureClient
         void OnSkeletonUpdate(double timestamp, IList<SkeletonLandmark> landmarks);
         void OnGestureRecognized(double timestamp, RecognizedGesture gesture);
         void OnEmotionUpdate(string label, float confidence, string difficultyHint);
+        void OnYoloDetection(IList<YoloObject> detections);
+        void OnGazeUpdate(float x, float y);
     }
 
     public class SkeletonLandmark
@@ -35,5 +37,15 @@ namespace GestureClient
         public string Label { get; set; }
         public float Confidence { get; set; }
         public string DifficultyHint { get; set; }
+    }
+
+    public class YoloObject
+    {
+        public string ClassName { get; set; }
+        public float Confidence { get; set; }
+        public float X { get; set; }
+        public float Y { get; set; }
+        public float W { get; set; }
+        public float H { get; set; }
     }
 }

@@ -26,4 +26,4 @@ if results:
         conf = float(box.conf[0])
         print(f"   - {cls}: {conf:.1%}")
 
-print("\n✓ YOLO26m Detection Test Complete!")
+print("\n[OK] YOLO26m Detection Test Complete!")

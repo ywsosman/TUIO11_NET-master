@@ -52,7 +52,7 @@ if results:
         print(f"      Bbox: [{xyxy[0]:.0f}, {xyxy[1]:.0f}, {xyxy[2]:.0f}, {xyxy[3]:.0f}]")
     
     print("\n" + "=" * 50)
-    print("✓ YOLO26m Detection Working!")
+    print("[OK] YOLO26m Detection Working!")
     print("=" * 50)
     
     # Try saving annotated image
@@ -64,4 +64,4 @@ if results:
 else:
     print("No detections found")
 
-print("\n✓ Python YOLO26m Enhanced Interface Test Complete!")
+print("\n[OK] Python YOLO26m Enhanced Interface Test Complete!")

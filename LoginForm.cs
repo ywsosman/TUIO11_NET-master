@@ -1,9 +1,13 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Linq;
+using System.Threading;
 using System.Windows.Forms;
 using GestureClient;
 using TUIO;
+using TuioDemoApp;
 
 public class LoginForm : Form, TuioListener
 {
@@ -12,6 +16,7 @@ public class LoginForm : Form, TuioListener
     private RoundedButton btnRadialGesture;
     private Label labelTitle;
     private Label labelStatus;
+    private Label labelBluetooth;
     private Label label1;
     private Button btnClose;
     private bool isScanning = false;
@@ -22,7 +27,31 @@ public class LoginForm : Form, TuioListener
     private Point dragCursorPoint;
     private Point dragFormPoint;
 
+    // Face login state
+    private Thread faceLoginThread;
+    private CancellationTokenSource faceLoginCts;
+    private bool loginCompleted;
+    private readonly object loginLock = new object();
+
+    // Bluetooth login state
+    private BluetoothDevicePairingManager btManager;
+    private readonly HashSet<string> btKnownAtStart = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    private bool btBaselineCaptured;
+
+    // Face-priority race control. While true, BT/marker detections are queued
+    // rather than completing the login; this gives enrolment Face ID time to finish
+    private bool faceLoginActive = true;
+    private PairedBluetoothDevice queuedBtDevice;
+    /// <summary>Marker symbol ID held while Face ID loads; completes sign-in if face fails.</summary>
+    private int? queuedMarkerSymbolId;
+
     public bool UseRadialGestureMode { get; private set; }
+    public bool IsTeacher { get; private set; }
+    public double? IdentifiedAgeYears { get; private set; }
+    /// <summary>Resolved progress key (<c>student:youssef</c>, <c>teacher:dr-ayman</c>, <c>student:marker-5</c>, …).</summary>
+    public string UserProfileKey { get; private set; }
+    /// <summary>Display name when identified via enrolled face (<see cref="FaceLogin.LoginResult.PersonDisplayName"/>).</summary>
+    public string IdentifiedPersonName { get; private set; }
 
     public LoginForm(int port)
     {
@@ -32,29 +61,331 @@ public class LoginForm : Form, TuioListener
         client = new TuioClient(port);
         client.addTuioListener(this);
 
-        // Auto-start scanning and gesture mode
+        // Three parallel sign-in paths: face ID (Python camera), TUIO marker, Bluetooth tag.
         UseRadialGestureMode = true;
+        IsTeacher = false;
         isScanning = true;
-        
+
+        // No buttons: hide every control that InitializeComponent created.
         btnScan.Visible = false;
         btnRadialGesture.Visible = false;
-        
+        if (btnAdminPanel != null) btnAdminPanel.Visible = false;
+        if (label1 != null) label1.Visible = false;
+
         labelStatus = new Label();
         labelStatus.BackColor = Color.Transparent;
         labelStatus.ForeColor = Color.White;
         labelStatus.TextAlign = ContentAlignment.MiddleCenter;
-        labelStatus.Text = "Please show your marker to the camera!";
-        labelStatus.Font = new Font("Comic Sans MS", 16F, FontStyle.Bold);
-        labelStatus.Size = new Size(450, 40);
-        labelStatus.Location = new Point(0, 150);
+        labelStatus.Text = "A separate camera window will open for face sign-in. Look at the camera when it appears. Marker or Bluetooth work if face login fails.";
+        labelStatus.Font = new Font("Comic Sans MS", 13F, FontStyle.Bold);
+        labelStatus.Size = new Size(450, 110);
+        labelStatus.Location = new Point(0, 90);
         this.Controls.Add(labelStatus);
 
-        try 
+        labelBluetooth = new Label();
+        labelBluetooth.BackColor = Color.Transparent;
+        labelBluetooth.ForeColor = Color.FromArgb(220, 240, 255);
+        labelBluetooth.TextAlign = ContentAlignment.MiddleCenter;
+        labelBluetooth.Text = "Bluetooth: searching...";
+        labelBluetooth.Font = new Font("Comic Sans MS", 11F, FontStyle.Bold);
+        labelBluetooth.Size = new Size(450, 30);
+        labelBluetooth.Location = new Point(0, 225);
+        this.Controls.Add(labelBluetooth);
+
+        try
         {
             if (!client.isConnected())
                 client.connect();
-        } 
+        }
         catch { }
+
+        StartBluetoothLogin();
+
+        this.Shown += LoginForm_Shown;
+        this.FormClosing += LoginForm_FormClosing;
+    }
+
+    private void LoginForm_Shown(object sender, EventArgs e)
+    {
+        StartFaceLogin();
+    }
+
+    private void LoginForm_FormClosing(object sender, FormClosingEventArgs e)
+    {
+        try { faceLoginCts?.Cancel(); } catch { }
+        StopBluetoothLogin();
+    }
+
+    private void StartFaceLogin()
+    {
+        faceLoginCts = new CancellationTokenSource();
+        var token = faceLoginCts.Token;
+        faceLoginThread = new Thread(() =>
+        {
+            FaceLogin.LoginResult res;
+            try { res = FaceLogin.Run(cancellation: token); }
+            catch (Exception ex)
+            {
+                res = new FaceLogin.LoginResult
+                {
+                    Kind = FaceLogin.LoginKind.Error,
+                    ErrorMessage = ex.Message
+                };
+            }
+            OnFaceLoginCompleted(res);
+        });
+        faceLoginThread.IsBackground = true;
+        faceLoginThread.Start();
+    }
+
+    private void OnFaceLoginCompleted(FaceLogin.LoginResult result)
+    {
+        if (this.IsDisposed) return;
+        try
+        {
+            this.BeginInvoke((MethodInvoker)delegate
+            {
+                if (this.IsDisposed) return;
+                lock (loginLock)
+                {
+                    if (loginCompleted) return;
+
+                    // Face has finished racing — release the BT/marker queue
+                    // regardless of outcome so a fallback can take over.
+                    faceLoginActive = false;
+
+                    if (result.Kind == FaceLogin.LoginKind.Student ||
+                        result.Kind == FaceLogin.LoginKind.Teacher)
+                    {
+                        IsTeacher = (result.Kind == FaceLogin.LoginKind.Teacher);
+                        IdentifiedAgeYears = result.AgeYears;
+                        IdentifiedPersonName = result.PersonDisplayName ?? "";
+                        FinishLogin(DialogResult.OK,
+                            IsTeacher
+                                ? ("Welcome" + (
+                                    string.IsNullOrEmpty(IdentifiedPersonName) ? ", teacher!" : ", " + IdentifiedPersonName + "!"))
+                                : ("Welcome, " +
+                                    (string.IsNullOrEmpty(IdentifiedPersonName) ? "Let's play!" : IdentifiedPersonName + "!")),
+                            result.ProfileKey);
+                        return;
+                    }
+
+                    // Either user pressed Q on the preview window (MODE:CANCEL) or Python exited with error.
+                    // Don't close the form; give the held-back BT/marker their turn.
+                    if (TryUseQueuedSignIn()) return;
+
+                    if (result.Kind == FaceLogin.LoginKind.Cancelled)
+                    {
+                        if (labelStatus != null)
+                            labelStatus.Text = "Face ID skipped. Show a marker or connect a Bluetooth tag.";
+                        return;
+                    }
+
+                    // Error: surface the friendly message, keep marker + Bluetooth listening.
+                    if (labelStatus != null)
+                    {
+                        string detail = string.IsNullOrEmpty(result.ErrorMessage)
+                            ? "Face login unavailable."
+                            : result.ErrorMessage;
+                        if (detail.Length > 180) detail = detail.Substring(0, 180) + "...";
+                        labelStatus.Text =
+                            "Face login failed: " + detail +
+                            Environment.NewLine +
+                            "Show a marker or connect a Bluetooth tag. (see Documents/TUIO_Evaluation/face_login.log)";
+                    }
+                }
+            });
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+    }
+
+    /// <summary>
+    /// Called from <see cref="OnFaceLoginCompleted"/> after the face race ends
+    /// without a positive identification. If the user already showed a marker
+    /// or brought a Bluetooth tag close while face login was loading, sign in
+    /// with that path now. Caller must hold <see cref="loginLock"/>.
+    /// </summary>
+    private bool TryUseQueuedSignIn()
+    {
+        if (loginCompleted) return true;
+
+        if (queuedBtDevice != null)
+        {
+            var dev = queuedBtDevice;
+            queuedBtDevice = null;
+            IsTeacher = false;
+            IdentifiedAgeYears = null;
+            string name = string.IsNullOrEmpty(dev.DeviceName) ? dev.MacKey : dev.DeviceName;
+            FinishLogin(DialogResult.OK, "Welcome! " + name + " connected.", ProfileKeyForBluetooth(dev));
+            return true;
+        }
+
+        if (queuedMarkerSymbolId.HasValue)
+        {
+            int sid = queuedMarkerSymbolId.Value;
+            queuedMarkerSymbolId = null;
+            isScanning = false;
+            IsTeacher = false;
+            FinishLogin(DialogResult.OK, "Logged in! Let's play!", "student:marker-" + sid);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string ProfileKeyForBluetooth(PairedBluetoothDevice dev)
+    {
+        if (dev == null || string.IsNullOrEmpty(dev.MacKey))
+            return "student:ble-unknown";
+        var hexChars = dev.MacKey.Where(c =>
+            char.IsDigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')).ToArray();
+        string hex = new string(hexChars).ToUpperInvariant();
+        if (hex.Length >= 8)
+            hex = hex.Substring(hex.Length - 8);
+        if (!string.IsNullOrEmpty(hex))
+            return "student:ble-" + hex.ToLowerInvariant();
+        string slug = FaceLogin.ProfileSlug(dev.DeviceName ?? dev.MacKey);
+        return "student:" + (string.IsNullOrEmpty(slug) ? "ble-unknown" : "ble-" + slug);
+    }
+
+    private void FinishLogin(DialogResult dr, string statusText, string userProfileKey = null)
+    {
+        loginCompleted = true;
+        if (!string.IsNullOrWhiteSpace(userProfileKey))
+            UserProfileKey = userProfileKey.Trim();
+        if (labelStatus != null) labelStatus.Text = statusText ?? "";
+        try { client?.removeTuioListener(this); } catch { }
+        try { if (client != null && client.isConnected()) client.disconnect(); } catch { }
+        try { faceLoginCts?.Cancel(); } catch { }
+        StopBluetoothLogin();
+        this.DialogResult = dr;
+        this.Close();
+    }
+
+    // ── Bluetooth sign-in ─────────────────────────────────────────────────────
+
+    private void StartBluetoothLogin()
+    {
+        try
+        {
+            btManager = new BluetoothDevicePairingManager();
+            btManager.PairingStateChanged += OnBluetoothPairingChanged;
+            btManager.StatusMessage += OnBluetoothStatusMessage;
+            btManager.Start();
+        }
+        catch (Exception ex)
+        {
+            if (labelBluetooth != null)
+                labelBluetooth.Text = "Bluetooth unavailable (" + ex.Message + ")";
+        }
+    }
+
+    private void StopBluetoothLogin()
+    {
+        var mgr = btManager;
+        btManager = null;
+        if (mgr == null) return;
+        try { mgr.PairingStateChanged -= OnBluetoothPairingChanged; } catch { }
+        try { mgr.StatusMessage -= OnBluetoothStatusMessage; } catch { }
+        try { mgr.Dispose(); } catch { }
+    }
+
+    private void OnBluetoothStatusMessage(string message)
+    {
+        if (string.IsNullOrEmpty(message) || this.IsDisposed) return;
+        try
+        {
+            this.BeginInvoke((MethodInvoker)delegate
+            {
+                if (this.IsDisposed || loginCompleted) return;
+                if (labelBluetooth != null)
+                    labelBluetooth.Text = "Bluetooth: " + message;
+            });
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+    }
+
+    private void OnBluetoothPairingChanged(List<PairedBluetoothDevice> devices)
+    {
+        if (devices == null || this.IsDisposed) return;
+        try
+        {
+            this.BeginInvoke((MethodInvoker)delegate
+            {
+                if (this.IsDisposed) return;
+                lock (loginLock)
+                {
+                    if (loginCompleted) return;
+
+                    if (!btBaselineCaptured)
+                    {
+                        // First scan: remember whatever is already advertising so we don't
+                        // sign the user in for devices that were sitting there before login.
+                        foreach (var d in devices)
+                            if (d != null && !string.IsNullOrEmpty(d.MacKey))
+                                btKnownAtStart.Add(d.MacKey);
+                        btBaselineCaptured = true;
+                        UpdateBluetoothLabel(devices, null);
+                        return;
+                    }
+
+                    PairedBluetoothDevice newKey = null;
+                    foreach (var d in devices)
+                    {
+                        if (d == null || !d.IsConnected) continue;
+                        if (string.IsNullOrEmpty(d.MacKey)) continue;
+                        if (!btKnownAtStart.Contains(d.MacKey))
+                        {
+                            newKey = d;
+                            break;
+                        }
+                    }
+
+                    UpdateBluetoothLabel(devices, newKey);
+
+                    if (newKey != null)
+                    {
+                        if (faceLoginActive)
+                        {
+                            // Face has priority; remember the device but don't sign in yet.
+                            queuedBtDevice = newKey;
+                            if (labelBluetooth != null)
+                            {
+                                string name = string.IsNullOrEmpty(newKey.DeviceName) ? newKey.MacKey : newKey.DeviceName;
+                                labelBluetooth.Text = "Bluetooth: " + name + " ready (waiting for Face ID...)";
+                            }
+                            return;
+                        }
+
+                        IsTeacher = false; // Bluetooth tag = student sign-in
+                        IdentifiedAgeYears = null;
+                        string deviceName = string.IsNullOrEmpty(newKey.DeviceName) ? newKey.MacKey : newKey.DeviceName;
+                        FinishLogin(DialogResult.OK, "Welcome! " + deviceName + " connected.",
+                            ProfileKeyForBluetooth(newKey));
+                    }
+                }
+            });
+        }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+    }
+
+    private void UpdateBluetoothLabel(List<PairedBluetoothDevice> devices, PairedBluetoothDevice signInDevice)
+    {
+        if (labelBluetooth == null) return;
+        if (signInDevice != null)
+        {
+            labelBluetooth.Text = "Bluetooth: signing in via " + (signInDevice.DeviceName ?? signInDevice.MacKey);
+            return;
+        }
+        int connected = 0;
+        foreach (var d in devices)
+            if (d != null && d.IsConnected) connected++;
+        labelBluetooth.Text = connected == 0
+            ? "Bluetooth: searching for a tag..."
+            : "Bluetooth: " + connected + " device(s) seen. Bring a NEW tag close to sign in.";
     }
 
     private void InitializeComponent()
@@ -190,12 +521,13 @@ public class LoginForm : Form, TuioListener
         {
             gc.Connect();
             gc.Disconnect();
-            UseRadialGestureMode = true;
-            client.removeTuioListener(this);
-            if (client.isConnected())
-                client.disconnect();
-            DialogResult = DialogResult.OK;
-            Close();
+            lock (loginLock)
+            {
+                if (loginCompleted) return;
+                UseRadialGestureMode = true;
+                IsTeacher = true; // manual gesture login = teacher / unrestricted
+                FinishLogin(DialogResult.OK, "Welcome, teacher!", "teacher:default");
+            }
         }
         catch
         {
@@ -223,25 +555,36 @@ public class LoginForm : Form, TuioListener
         }
     }
 
-    // TuioListener implementation
+    // TuioListener implementation. Marker sign-in is held back while Face ID
+    // is still loading; if Face ID fails, a previously-shown marker can complete the login.
     public void addTuioObject(TuioObject tobj)
     {
         if (isScanning && tobj.SymbolID >= 0 && tobj.SymbolID <= 7)
         {
             this.Invoke((MethodInvoker)delegate {
-                if (labelStatus != null) labelStatus.Text = "Logged in! Let's play!";
-                isScanning = false;
-                client.removeTuioListener(this);
-                client.disconnect();
+                lock (loginLock)
+                {
+                    if (loginCompleted) return;
 
-                this.DialogResult = DialogResult.OK;
-                this.Close();
+                    if (faceLoginActive)
+                    {
+                        queuedMarkerSymbolId = tobj.SymbolID;
+                        if (labelStatus != null)
+                            labelStatus.Text = "Marker recognised - holding while Face ID tries to identify you...";
+                        return;
+                    }
+
+                    isScanning = false;
+                    IsTeacher = false; // marker scan keeps the student profile
+                    FinishLogin(DialogResult.OK, "Logged in! Let's play!", "student:marker-" + tobj.SymbolID);
+                }
             });
         }
         else if (isScanning)
         {
             this.Invoke((MethodInvoker)delegate {
-                if (labelStatus != null) labelStatus.Text = "Hmm, I don't recognize that marker. Try another!";
+                if (labelStatus != null && !loginCompleted && !faceLoginActive)
+                    labelStatus.Text = "Hmm, I don't recognize that marker. Try another!";
             });
         }
     }

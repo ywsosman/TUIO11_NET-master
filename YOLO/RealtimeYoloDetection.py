@@ -308,7 +308,7 @@ class EnhancedYoloInterface:
                     xyxy = box.xyxy[0].cpu().numpy()
                     conf = float(box.conf[0])
                     cls = int(box.cls[0])
-                    class_name = f"🍎 {result.names[cls]}"
+                    class_name = f"fruit: {result.names[cls]}"
 
                     x1, y1, x2, y2 = map(int, xyxy)
                     self.draw_bounding_box(frame, x1, y1, x2, y2, class_name, conf)
