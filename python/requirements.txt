@@ -1,0 +1,27 @@
+# =============================================================================
+# Python 3.11–3.14: use py -3.12 -m venv python\.venv, then activate and:
+#     pip install -r requirements.txt
+# Face login (see python/people/ + roles.tsv): prefers face_recognition (face.ipynb) if installed;
+# otherwise DeepFace / TensorFlow. Optional notebook stack:
+#   pip install face_recognition   # often needs MSVC Build Tools / cmake on Windows Py3.12
+# =============================================================================
+
+opencv-python>=4.8,<5
+numpy>=1.23,<2
+dollarpy
+mediapipe>=0.10
+
+ultralytics>=8.0
+
+# Face enrolment login (DeepFace embeddings; see people/roles.tsv.example)
+deepface>=0.0.93
+tensorflow>=2.13,<2.17
+tf-keras>=2.13
+
+# Optional: Jupyter notebook experiments (needs desktop OpenCV bindings)
+# opencv-python (swap with headless variant if gesture server only needs headless)
+
+# Face emotion extras (optional)
+# pip install hsemotion-onnx onnxruntime
+
+# Optional notebook stack (face.ipynb): conda install cmake dlib, then pip install face_recognition

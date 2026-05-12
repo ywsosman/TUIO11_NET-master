@@ -21,7 +21,7 @@ fruit_images = [
     'bin/Debug/kiwi.jpeg'
 ]
 
-print("\n📷 Running detection on fruit images...\n")
+print("\nRunning detection on fruit images...\n")
 
 for img_path in fruit_images:
     if not os.path.exists(img_path):
@@ -47,7 +47,7 @@ for img_path in fruit_images:
             annotated = results[0].plot()
             output_name = f"fruit_test_{os.path.basename(img_path).replace('.jpeg', '.jpg')}"
             cv2.imwrite(output_name, annotated)
-            print(f"     💾 Saved: {output_name}")
+            print(f"     Saved: {output_name}")
         else:
             print(f"  ❌ No objects detected")
             # Save original as-is

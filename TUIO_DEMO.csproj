@@ -51,6 +51,8 @@
   -->
   <ItemGroup>
     <Compile Include="BluetoothDevicePairingManager.cs" />
+    <Compile Include="FaceLogin.cs" />
+    <Compile Include="UserProgressStore.cs" />
     <Compile Include="Models\Level.cs" />
     <Compile Include="OSC.NET\OSCBundle.cs" />
     <Compile Include="OSC.NET\OSCMessage.cs" />

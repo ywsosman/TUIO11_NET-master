@@ -131,6 +131,8 @@ namespace GestureClient
                     var skeleton = ParseSkeleton(msg);
                     var gesture = ParseGesture(msg);
                     var emotion = ParseEmotion(msg);
+                    var yolo = ParseYolo(msg);
+                    var gaze = ParseGaze(msg);
 
                     lock (listenerLock)
                     {
@@ -144,6 +146,10 @@ namespace GestureClient
                                     l.OnGestureRecognized(timestamp, gesture);
                                 if (emotion != null)
                                     l.OnEmotionUpdate(emotion.Label, (float)emotion.Confidence, emotion.DifficultyHint);
+                                if (yolo != null && yolo.Count > 0)
+                                    l.OnYoloDetection(yolo);
+                                if (gaze != null)
+                                    l.OnGazeUpdate(gaze[0], gaze[1]);
                             }
                             catch (Exception ex)
                             {
@@ -286,6 +292,37 @@ namespace GestureClient
                 Confidence = (float)GetDouble(dict, "confidence"),
                 DifficultyHint = GetString(dict, "difficulty_hint")
             };
+        }
+
+        private List<YoloObject> ParseYolo(Dictionary<string, object> msg)
+        {
+            if (!msg.ContainsKey("yolo") || msg["yolo"] == null) return null;
+            var arr = msg["yolo"] as List<object>;
+            if (arr == null) return null;
+            var result = new List<YoloObject>();
+            foreach (var item in arr)
+            {
+                var dict = item as Dictionary<string, object>;
+                if (dict == null) continue;
+                result.Add(new YoloObject
+                {
+                    ClassName = GetString(dict, "class"),
+                    Confidence = (float)GetDouble(dict, "conf"),
+                    X = (float)GetDouble(dict, "x"),
+                    Y = (float)GetDouble(dict, "y"),
+                    W = (float)GetDouble(dict, "w"),
+                    H = (float)GetDouble(dict, "h")
+                });
+            }
+            return result;
+        }
+
+        private float[] ParseGaze(Dictionary<string, object> msg)
+        {
+            if (!msg.ContainsKey("gaze") || msg["gaze"] == null) return null;
+            var dict = msg["gaze"] as Dictionary<string, object>;
+            if (dict == null) return null;
+            return new float[] { (float)GetDouble(dict, "x"), (float)GetDouble(dict, "y") };
         }
 
         private static int GetInt(Dictionary<string, object> d, string key)

@@ -44,3 +44,25 @@ TestResults/
 ehthumbs.db
 Icon?
 Thumbs.db
+
+# Python virtual environments #
+###############################
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/env/
+
+# Python build / cache artefacts #
+##################################
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# DeepFace model cache (~hundreds of MB, downloaded on first run) #
+###################################################################
+.deepface/

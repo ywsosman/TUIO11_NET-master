@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Speech.Synthesis;
 using System.Threading;
 using System.Windows.Forms;
@@ -40,8 +44,24 @@ namespace TuioDemoApp
     // ── Emotion / difficulty state ────────────────────────────────────────────
     private string currentDifficultyHint = "normal";   // "easier", "harder", "normal"
     private string currentEmotionLabel   = "";
-    private float  currentEmotionConf    = 0f;
+    private float currentEmotionConf     = 0.0f;
     private DateTime emotionLastUpdate   = DateTime.MinValue;
+
+    private PointF currentGazePoint = new PointF(-1, -1);
+    private readonly object gazeHistoryLock = new object();
+    private List<PointF> gazeHistory = new List<PointF>();
+    private const int MaxGazeHistorySamples = 120000;
+    private readonly DateTime sessionStartUtc = DateTime.UtcNow;
+
+    private readonly object evalLock = new object();
+    private int evalSuccessfulPlacements;
+    private int evalRadialOpens;
+    private int evalRadialCloses;
+    private int evalLevelsCompletedEvents;
+    private readonly Dictionary<string, int> evalEmotionCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    private readonly List<int> evalLevelScoresHistory = new List<int>();
+    private readonly List<double> evalLevelCompletionSeconds = new List<double>();
+    private readonly Stopwatch levelStopwatch = new Stopwatch();
     // Pulse animation tick counter for hint arrows
     private int    hintPulseTick         = 0;
     
@@ -79,7 +99,6 @@ namespace TuioDemoApp
     private bool verbose;
     private bool pendingLevelComplete;
     private int currentLevelIndex;
-    private DateTime levelStartTime;
     private Image fallbackBackground;
     private dynamic objectPlayer;
 
@@ -105,8 +124,11 @@ namespace TuioDemoApp
     private Point radialCursorPoint = Point.Empty;
     private int radialHoveredIndex = -1;
     private DateTime radialHoverSince = DateTime.MinValue;
-    private readonly int radialDwellMs = 500;
-    private bool radialSelectionLocked;
+    private readonly int radialDwellMs = 1500;
+    private DateTime closeGestureHoverSince = DateTime.MinValue;
+    private const int CloseButtonGestureDwellMs = 900;
+    private const int CloseButtonGestureInflatePx = 22;
+    private bool shuttingDown;    private bool radialSelectionLocked;
     private DateTime radialLastActionAt = DateTime.MinValue;
     private readonly int radialRepeatDelayMs = 250;
     private bool speechIsPlaying;
@@ -117,8 +139,28 @@ namespace TuioDemoApp
     private DateTime bluetoothStatusAt = DateTime.MinValue;
     private bool bluetoothMenuOpen;
 
+    private Button closeGameButton;
+
+    // ── Per-user progress / face-login profile ────────────────────────────────
+    private readonly bool isTeacher;
+    private readonly string userProfileKey;
+    private readonly UserProgressStore progressStore;
+
     public TuioDemo(int port, bool useRadialGestureMode = false)
+        : this(port, useRadialGestureMode, false, null, null)
     {
+    }
+
+    public TuioDemo(int port, bool useRadialGestureMode, bool isTeacher, string userProfileKey, UserProgressStore progressStore)
+    {
+        this.isTeacher = isTeacher;
+        this.userProfileKey = string.IsNullOrEmpty(userProfileKey)
+            ? (isTeacher ? "teacher:default" : "student:default")
+            : userProfileKey;
+        this.progressStore = progressStore ?? UserProgressStore.Load();
+        // Ensure the profile row exists so subsequent saves preserve the kind.
+        this.progressStore.EnsureProfile(this.userProfileKey, isTeacher ? "teacher" : "student");
+
         verbose = false;
         fullscreen = false;
         radialGestureMode = useRadialGestureMode;
@@ -132,19 +174,23 @@ namespace TuioDemoApp
         Name = "TuioDemo";
         Text = "Object Learning Game";
 
-        Button btnClose = new Button();
-        btnClose.Text = "X";
-        btnClose.Font = new Font("Comic Sans MS", 14F, FontStyle.Bold);
-        btnClose.ForeColor = Color.White;
-        btnClose.BackColor = Color.FromArgb(255, 80, 80);
-        btnClose.FlatStyle = FlatStyle.Flat;
-        btnClose.FlatAppearance.BorderSize = 0;
-        btnClose.Size = new Size(40, 40);
-        btnClose.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        btnClose.Location = new Point(Screen.PrimaryScreen.Bounds.Width - 45, 5);
-        btnClose.Cursor = Cursors.Hand;
-        btnClose.Click += (s, e) => { this.Close(); };
-        this.Controls.Add(btnClose);
+        closeGameButton = new Button();
+        closeGameButton.Text = "X";
+        closeGameButton.Font = new Font("Arial", 16F, FontStyle.Bold);
+        closeGameButton.ForeColor = Color.White;
+        closeGameButton.BackColor = Color.FromArgb(232, 60, 60);
+        closeGameButton.FlatStyle = FlatStyle.Flat;
+        closeGameButton.FlatAppearance.BorderSize = 0;
+        closeGameButton.FlatAppearance.BorderColor = Color.FromArgb(180, 30, 30);
+        closeGameButton.Cursor = Cursors.Hand;
+        closeGameButton.Size = new Size(48, 48);
+        closeGameButton.TabStop = false;
+        closeGameButton.AccessibleDescription = "Close application";
+        closeGameButton.Margin = Padding.Empty;
+        closeGameButton.Click += (s, e) => { Close(); };
+
+        Controls.Add(closeGameButton);
+        closeGameButton.BringToFront();
 
         Closing += Form_Closing;
         KeyDown += Form_KeyDown;
@@ -195,33 +241,44 @@ namespace TuioDemoApp
         {
             Console.WriteLine("[TuioDemo] Gesture server not available: " + ex.Message);
         }
+
+        LayoutCloseButton();
+    }
+
+    private void LayoutCloseButton()
+    {
+        if (closeGameButton == null || closeGameButton.IsDisposed) return;
+        const int pad = 10;
+        int x = Math.Max(pad, ClientSize.Width - closeGameButton.Width - pad);
+        int y = pad;
+        closeGameButton.Location = new Point(x, y);
+        closeGameButton.BringToFront();
     }
 
     public void OnSkeletonUpdate(double timestamp, IList<SkeletonLandmark> landmarks)
     {
         if (!radialGestureMode || landmarks == null) return;
-        // Prefer index tip over wrist for cursor
         var wrist = landmarks.FirstOrDefault(l => l.Name == "right_wrist" || l.Name == "left_wrist" || l.Name == "right_index" || l.Name == "left_index");
         if (wrist != null && wrist.Visibility > 0.3f)
         {
             gestureWristX = wrist.X;
             gestureWristY = wrist.Y;
-            // index cursor
             if (radialMenuOpen && !radialCursorFollowsGesture && gestureWristX >= 0 && gestureWristY >= 0)
-            {
                 radialCursorFollowsGesture = true;
+
+            bool pointerActive = !radialMenuOpen || radialCursorFollowsGesture;
+            if (pointerActive && gestureWristX >= 0f && gestureWristY >= 0f &&
+                !float.IsNaN(gestureWristX) && !float.IsNaN(gestureWristY))
+            {
+                int px = (int)(gestureWristX * width);
+                int py = (int)(gestureWristY * height);
+                radialCursorPoint = new Point(px, py);
             }
         }
         else
         {
             gestureWristX = -1f;
             gestureWristY = -1f;
-        }
-        if (radialMenuOpen && radialCursorFollowsGesture && gestureWristX >= 0 && gestureWristY >= 0)
-        {
-            int px = (int)(gestureWristX * width);
-            int py = (int)(gestureWristY * height);
-            radialCursorPoint = new Point(px, py);
         }
         if (IsHandleCreated && !IsDisposed)
             BeginInvoke((MethodInvoker)(() => Invalidate()));
@@ -272,6 +329,227 @@ namespace TuioDemoApp
         currentEmotionConf   = confidence;
         emotionLastUpdate    = DateTime.Now;
         ApplyDifficultyHint(difficultyHint);
+        if (!string.IsNullOrEmpty(label))
+        {
+            lock (evalLock)
+            {
+                int n;
+                evalEmotionCounts[label] = evalEmotionCounts.TryGetValue(label, out n) ? n + 1 : 1;
+            }
+        }
+    }
+
+    public void OnYoloDetection(IList<YoloObject> detections)
+    {
+        // YOLO is not drawn in this app; it runs on the gesture server only.
+    }
+
+    public void OnGazeUpdate(float x, float y)
+    {
+        currentGazePoint = new PointF(x, y);
+        lock (gazeHistoryLock)
+        {
+            if (gazeHistory.Count >= MaxGazeHistorySamples)
+                gazeHistory.RemoveAt(0);
+            gazeHistory.Add(currentGazePoint);
+        }
+        if (IsHandleCreated && !IsDisposed)
+            BeginInvoke((MethodInvoker)(() => Invalidate()));
+    }
+
+    private string SaveEvaluationArtifacts()
+    {
+        try
+        {
+            // Exports go to Documents\TUIO_Evaluation (easy to find; not buried under bin\Debug).
+            string evalDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                "TUIO_Evaluation");
+            Directory.CreateDirectory(evalDir);
+            string stamp = sessionStartUtc.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture) + "Z";
+            string jsonPath = Path.Combine(evalDir, "evaluation_" + stamp + ".json");
+            string pngPath = Path.Combine(evalDir, "gaze_heatmap_" + stamp + ".png");
+
+            DateTime endUtc = DateTime.UtcNow;
+            double durationSec;
+            int placements, opens, closes, levelEvents, gazeSamples;
+            Dictionary<string, int> emotionSnap;
+            List<int> scoresSnap;
+            List<double> levelTimesSnap;
+            string diffHint;
+
+            lock (evalLock)
+            {
+                durationSec = (endUtc - sessionStartUtc).TotalSeconds;
+                placements = evalSuccessfulPlacements;
+                opens = evalRadialOpens;
+                closes = evalRadialCloses;
+                levelEvents = evalLevelsCompletedEvents;
+                emotionSnap = new Dictionary<string, int>(evalEmotionCounts);
+                scoresSnap = new List<int>(evalLevelScoresHistory);
+                levelTimesSnap = new List<double>(evalLevelCompletionSeconds);
+                diffHint = currentDifficultyHint ?? "normal";
+            }
+
+            List<PointF> gazeSnap;
+            lock (gazeHistoryLock)
+            {
+                gazeSamples = gazeHistory.Count;
+                gazeSnap = new List<PointF>(gazeHistory);
+            }
+
+            var sb = new StringBuilder(512);
+            sb.Append('{');
+            sb.Append("\"session_start_utc\":\"").Append(EscapeJson(sessionStartUtc.ToString("o"))).Append("\",");
+            sb.Append("\"session_end_utc\":\"").Append(EscapeJson(endUtc.ToString("o"))).Append("\",");
+            sb.Append("\"duration_seconds\":").Append(durationSec.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)).Append(',');
+            sb.Append("\"successful_placements\":").Append(placements).Append(',');
+            sb.Append("\"radial_menu_opens\":").Append(opens).Append(',');
+            sb.Append("\"radial_menu_closes\":").Append(closes).Append(',');
+            sb.Append("\"levels_completed_events\":").Append(levelEvents).Append(',');
+            sb.Append("\"gaze_samples_recorded\":").Append(gazeSamples).Append(',');
+            sb.Append("\"final_difficulty_hint\":\"").Append(EscapeJson(diffHint)).Append("\",");
+            sb.Append("\"level_scores\":[");
+            for (int i = 0; i < scoresSnap.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(scoresSnap[i]);
+            }
+            sb.Append("],");
+            sb.Append("\"level_completion_seconds\":[");
+            for (int i = 0; i < levelTimesSnap.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(levelTimesSnap[i].ToString("F3", CultureInfo.InvariantCulture));
+            }
+            sb.Append("],");
+            sb.Append("\"emotion_counts\":{");
+            bool firstEmo = true;
+            foreach (var kv in emotionSnap.OrderBy(k => k.Key))
+            {
+                if (!firstEmo) sb.Append(',');
+                firstEmo = false;
+                sb.Append('"').Append(EscapeJson(kv.Key)).Append("\":").Append(kv.Value);
+            }
+            sb.Append("},");
+            const int gazeExportStride = 30;
+            AppendGazePointsJson(sb, gazeSnap, gazeExportStride);
+            sb.Append(',');
+            sb.Append("\"export_directory\":\"").Append(EscapeJson(Path.GetDirectoryName(jsonPath))).Append("\"}");
+
+            File.WriteAllText(jsonPath, sb.ToString(), Encoding.UTF8);
+            SaveGazeHeatmapPng(pngPath);
+
+            string msg = "[TuioDemo] Session evaluation saved to:\n  " + jsonPath + "\n  " + pngPath;
+            Console.WriteLine(msg);
+            return jsonPath;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[TuioDemo] Evaluation export failed: " + ex.Message);
+            try
+            {
+                MessageBox.Show(
+                    this,
+                    "Could not save session evaluation.\r\n\r\n" + ex.Message,
+                    "Evaluation save failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+            catch
+            {
+            }
+            return null;
+        }
+    }
+
+    private static string EscapeJson(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var sb = new StringBuilder(s.Length + 8);
+        foreach (char c in s)
+        {
+            switch (c)
+            {
+                case '\\': sb.Append("\\\\"); break;
+                case '"': sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                default: sb.Append(c); break;
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Appends "gaze_export_stride" and "gaze_points" (normalized x,y, downsampled) for JSON export.</summary>
+    private static void AppendGazePointsJson(StringBuilder sb, IList<PointF> pts, int stride)
+    {
+        if (stride < 1) stride = 1;
+        sb.Append("\"gaze_export_stride\":").Append(stride).Append(',');
+        sb.Append("\"gaze_points\":[");
+        bool first = true;
+        for (int i = 0; i < pts.Count; i += stride)
+        {
+            PointF p = pts[i];
+            if (float.IsNaN(p.X) || float.IsNaN(p.Y)) continue;
+            if (p.X < 0 || p.Y < 0 || p.X > 1.001f || p.Y > 1.001f) continue;
+            if (!first) sb.Append(',');
+            first = false;
+            sb.Append("{\"x\":").Append(((double)p.X).ToString("F4", CultureInfo.InvariantCulture))
+              .Append(",\"y\":").Append(((double)p.Y).ToString("F4", CultureInfo.InvariantCulture)).Append('}');
+        }
+        sb.Append(']');
+    }
+
+    private void SaveGazeHeatmapPng(string path)
+    {
+        List<PointF> copy;
+        lock (gazeHistoryLock)
+            copy = new List<PointF>(gazeHistory);
+
+        const int gw = 160;
+        const int gh = 90;
+        const int scale = 6;
+        int[,] bins = new int[gw, gh];
+        foreach (var p in copy)
+        {
+            if (float.IsNaN(p.X) || float.IsNaN(p.Y)) continue;
+            if (p.X < 0 || p.Y < 0 || p.X > 1.001f || p.Y > 1.001f) continue;
+            int bx = (int)(p.X * gw);
+            int by = (int)(p.Y * gh);
+            if (bx >= gw) bx = gw - 1;
+            if (by >= gh) by = gh - 1;
+            if (bx < 0) bx = 0;
+            if (by < 0) by = 0;
+            bins[bx, by]++;
+        }
+
+        int max = 1;
+        for (int x = 0; x < gw; x++)
+            for (int y = 0; y < gh; y++)
+                if (bins[x, y] > max) max = bins[x, y];
+
+        using (Bitmap bmp = new Bitmap(gw * scale, gh * scale))
+        {
+            using (Graphics g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.FromArgb(24, 24, 32));
+                for (int x = 0; x < gw; x++)
+                {
+                    for (int y = 0; y < gh; y++)
+                    {
+                        double t = bins[x, y] / (double)max;
+                        int r = (int)(255 * Math.Min(1.0, Math.Max(0.0, (t - 0.25) * 2)));
+                        int gr = (int)(40 + 215 * Math.Min(1.0, Math.Max(0.0, 1.0 - Math.Abs(t - 0.55) * 3)));
+                        int b = (int)(255 * Math.Min(1.0, Math.Max(0.0, (0.72 - t) * 2)));
+                        using (SolidBrush brush = new SolidBrush(Color.FromArgb(255, r, gr, b)))
+                            g.FillRectangle(brush, x * scale, y * scale, scale, scale);
+                    }
+                }
+            }
+
+            bmp.Save(path, ImageFormat.Png);
+        }
     }
 
     /// <summary>
@@ -289,6 +567,57 @@ namespace TuioDemoApp
             BeginInvoke((MethodInvoker)(() => Invalidate()));
     }
 
+    private const float AdaptiveHintMinEmotionConfidence = 0.55f;
+
+    private static bool IsFrustrationLikeEmotion(string label)
+    {
+        if (string.IsNullOrEmpty(label)) return false;
+        switch (label.Trim().ToLowerInvariant())
+        {
+            case "sad":
+            case "angry":
+            case "fear":
+            case "disgust":
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Contextual help when the emotion system widens difficulty (easier) or detects negative affect.
+    /// Uses the next unplaced fruit and TUIO/Reactivision marker wording.
+    /// </summary>
+    private string BuildAdaptivePlacementHintForSlot(TargetSlot slot)
+    {
+        if (slot == null) return "";
+        string name = string.IsNullOrWhiteSpace(slot.ObjectName) ? "fruit" : slot.ObjectName;
+        if (slot.SymbolId == 3 || slot.SymbolId == 6)
+            return $"Stuck? Turn the {name} marker so it matches the rotated fruit on the board!";
+        return $"Hold the {name} marker up to the camera — line it up with the {name} silhouette!";
+    }
+
+    private bool TryGetAdaptivePlacementHint(out string hint)
+    {
+        hint = "";
+        if (CurrentLevel == null) return false;
+
+        double emotionAgeSec = (DateTime.Now - emotionLastUpdate).TotalSeconds;
+        if (emotionAgeSec > 14.0 || string.IsNullOrEmpty(currentEmotionLabel)) return false;
+        if (currentEmotionConf < AdaptiveHintMinEmotionConfidence) return false;
+
+        bool easier = string.Equals(currentDifficultyHint, "easier", StringComparison.OrdinalIgnoreCase);
+        bool negative = IsFrustrationLikeEmotion(currentEmotionLabel);
+
+        if (!easier && !negative) return false;
+
+        TargetSlot next = CurrentLevel.Targets.FirstOrDefault(t => !t.IsPlaced);
+        if (next == null) return false;
+
+        hint = BuildAdaptivePlacementHintForSlot(next);
+        return !string.IsNullOrEmpty(hint);
+    }
+
     private void BuildLevels()
     {
         levels.Clear();
@@ -300,22 +629,37 @@ namespace TuioDemoApp
             BoardImageName = "level 1.png"
         };
 
-        level1.Targets.Add(new TargetSlot { SymbolId = 0, ObjectName = "Apple", XNormalized = 0.23f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
-        level1.Targets.Add(new TargetSlot { SymbolId = 1, ObjectName = "Banana", XNormalized = 0.75f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
+        level1.Targets.Add(new TargetSlot { SymbolId = 0, ObjectName = "Apple", XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
+        level1.Targets.Add(new TargetSlot { SymbolId = 1, ObjectName = "Banana", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
 
         var level2 = new LevelDefinition
         {
             Name = "Level 2",
             BoardImageName = "level2.png"
         };
-        level2.Targets.Add(new TargetSlot { SymbolId = 2, ObjectName = "Strawberry", XNormalized = 0.11f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 3, ObjectName = "Watermelon", XNormalized = 0.30f, YNormalized = 0.50f, WidthNormalized = 0.15f, HeightNormalized = 0.21f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 4, ObjectName = "Mango", XNormalized = 0.50f, YNormalized = 0.45f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 5, ObjectName = "Orange", XNormalized = 0.69f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 6, ObjectName = "Kiwi", XNormalized = 0.88f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 2, ObjectName = "Strawberry", XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 3, ObjectName = "Watermelon", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.15f, HeightNormalized = 0.21f });
+
+        var level3 = new LevelDefinition
+        {
+            Name = "Level 3",
+            BoardImageName = "level2.png"
+        };
+        level3.Targets.Add(new TargetSlot { SymbolId = 4, ObjectName = "Mango", XNormalized = 0.38f, YNormalized = 0.45f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level3.Targets.Add(new TargetSlot { SymbolId = 5, ObjectName = "Orange", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
+
+        var level4 = new LevelDefinition
+        {
+            Name = "Level 4",
+            BoardImageName = "level2.png"
+        };
+        level4.Targets.Add(new TargetSlot { SymbolId = 6, ObjectName = "Kiwi", XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
+        level4.Targets.Add(new TargetSlot { SymbolId = 2, ObjectName = "Strawberry", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
 
         levels.Add(level1);
         levels.Add(level2);
+        levels.Add(level3);
+        levels.Add(level4);
     }
 
     private LevelDefinition CurrentLevel
@@ -332,6 +676,16 @@ namespace TuioDemoApp
     {
         if (levelIndex < 0 || levelIndex >= levels.Count) return;
 
+        if (!isTeacher && progressStore != null &&
+            progressStore.IsLevelLocked(userProfileKey, levelIndex, levels.Count))
+        {
+            // Refuse to start a locked level for a student. Stay on the highest unlocked.
+            int unlocked = progressStore.UnlockedLevels(userProfileKey, levels.Count);
+            int safeIndex = Math.Max(0, unlocked - 1);
+            if (currentLevelIndex == safeIndex) return;
+            levelIndex = safeIndex;
+        }
+
         currentLevelIndex = levelIndex;
         pendingLevelComplete = false;
         foreach (var slot in CurrentLevel.Targets)
@@ -339,7 +693,7 @@ namespace TuioDemoApp
             slot.IsPlaced = false;
         }
 
-        levelStartTime = DateTime.Now;
+        levelStopwatch.Restart();
 
         // Trigger animations
         levelTransitionOffset = this.ClientSize.Width > 0 ? this.ClientSize.Width : 1280;
@@ -512,12 +866,161 @@ namespace TuioDemoApp
 
     private void Form_MouseMove(object sender, MouseEventArgs e)
     {
-        if (!radialGestureMode || !radialCursorFollowsGesture)
-            radialCursorPoint = e.Location;
+        if (radialGestureMode)
+            return;
+        radialCursorPoint = e.Location;
+    }
+
+    private bool IsAnotherModalBlocking()
+    {
+        foreach (Form f in Application.OpenForms)
+        {
+            if (ReferenceEquals(f, this) || f == null || f.IsDisposed || !f.Visible)
+                continue;
+            if (f.Modal)
+                return true;
+        }
+        return false;
+    }
+
+    private void TickCloseButtonGestureDwell()
+    {
+        if (shuttingDown)
+            return;
+        if (!radialGestureMode || closeGameButton == null || closeGameButton.IsDisposed || !closeGameButton.Visible)
+            return;
+        if (IsAnotherModalBlocking())
+        {
+            if (closeGestureHoverSince != DateTime.MinValue)
+            {
+                closeGestureHoverSince = DateTime.MinValue;
+                Invalidate();
+            }
+            return;
+        }
+
+        if (gestureWristX < 0f || gestureWristY < 0f || float.IsNaN(gestureWristX) || float.IsNaN(gestureWristY))
+        {
+            if (closeGestureHoverSince != DateTime.MinValue)
+                Invalidate();
+            closeGestureHoverSince = DateTime.MinValue;
+            return;
+        }
+
+        Rectangle closeHit = closeGameButton.Bounds;
+        closeHit.Inflate(CloseButtonGestureInflatePx, CloseButtonGestureInflatePx);
+        var finger = new Point((int)(gestureWristX * width), (int)(gestureWristY * height));
+
+        if (!closeHit.Contains(finger))
+        {
+            if (closeGestureHoverSince != DateTime.MinValue)
+                Invalidate();
+            closeGestureHoverSince = DateTime.MinValue;
+            return;
+        }
+
+        DateTime now = DateTime.Now;
+        if (closeGestureHoverSince == DateTime.MinValue)
+        {
+            closeGestureHoverSince = now;
+            Invalidate();
+            return;
+        }
+
+        if ((now - closeGestureHoverSince).TotalMilliseconds >= CloseButtonGestureDwellMs)
+        {
+            closeGestureHoverSince = DateTime.MinValue;
+            BeginInvoke((MethodInvoker)delegate
+            {
+                if (!shuttingDown)
+                    Close();
+            });
+            return;
+        }
+
+        Invalidate();
+    }
+
+    private void DrawGestureOutsideRadialOverlay(Graphics g)
+    {
+        if (!radialGestureMode || radialMenuOpen) return;
+        if (gestureWristX < 0f || gestureWristY < 0f || float.IsNaN(gestureWristX) || float.IsNaN(gestureWristY))
+            return;
+
+        int fx = (int)(gestureWristX * width);
+        int fy = (int)(gestureWristY * height);
+
+        float ringOuter = Math.Max(16f, Math.Min((float)Math.Min(width, height) * 0.038f, 28f));
+
+        using (var fill = new SolidBrush(Color.FromArgb(95, 0, 230, 255)))
+        using (var pen = new Pen(Color.White, 2))
+        {
+            float d = ringOuter * 2f;
+            g.FillEllipse(fill, fx - ringOuter, fy - ringOuter, d, d);
+            g.DrawEllipse(pen, fx - ringOuter, fy - ringOuter, d, d);
+        }
+
+        if (closeGameButton != null && !closeGameButton.IsDisposed && closeGestureHoverSince != DateTime.MinValue)
+        {
+            Rectangle wb = closeGameButton.Bounds;
+            wb.Inflate(12, 12);
+            double p = (DateTime.Now - closeGestureHoverSince).TotalMilliseconds / (double)CloseButtonGestureDwellMs;
+            p = Math.Min(1.0, Math.Max(0.0, p));
+
+            float start = -90f;
+            float sweep = (float)(360.0 * p);
+            using (var penArc = new Pen(Color.FromArgb(255, 40, 200, 80), 4))
+            {
+                penArc.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                penArc.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                g.DrawArc(penArc, wb, start, sweep);
+            }
+        }
     }
 
     private void Form_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        shuttingDown = true;
+
+        string jsonPath = SaveEvaluationArtifacts();
+
+        if (!string.IsNullOrEmpty(jsonPath))
+        {
+            string folder = Path.GetDirectoryName(jsonPath) ?? "";
+            DialogResult answer = MessageBox.Show(
+                this,
+                "Session evaluation was saved.\r\n\r\n"
+                + "JSON:\r\n"
+                + jsonPath
+                + "\r\n\r\n"
+                + "The gaze heatmap PNG is in the same folder (matching date stamp).\r\n\r\n"
+                + "Open this folder in File Explorer?",
+                "Evaluation saved",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+
+            if (answer == DialogResult.Yes && !string.IsNullOrEmpty(folder))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = folder,
+                        UseShellExecute = true
+                    });
+                }
+                catch
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "explorer.exe",
+                        Arguments = "\"" + folder + "\"",
+                        UseShellExecute = true
+                    });
+                }
+            }
+        }
+
         animationTimer.Stop();
         radialTimer.Stop();
         if (bluetoothPairingManager != null)
@@ -627,6 +1130,10 @@ namespace TuioDemoApp
             if (slotRect.Contains(markerPoint) && IsValidPlacementState(o.SymbolID, isRotated90))
             {
                 slot.IsPlaced = true;
+                lock (evalLock)
+                {
+                    evalSuccessfulPlacements++;
+                }
             }
         }
 
@@ -639,13 +1146,30 @@ namespace TuioDemoApp
 
     private void HandleLevelCompleted()
     {
-        var elapsedSeconds = (DateTime.Now - levelStartTime).TotalSeconds;
+        levelStopwatch.Stop();
+        double elapsedSeconds = levelStopwatch.Elapsed.TotalSeconds;
         int score = CalculateLearningRate(CurrentLevel.Targets.Count, elapsedSeconds);
+        int completedIndex = currentLevelIndex;
         levelScores.Add(score);
+        lock (evalLock)
+        {
+            evalLevelsCompletedEvents++;
+            evalLevelScoresHistory.Add(score);
+            evalLevelCompletionSeconds.Add(elapsedSeconds);
+        }
+
+        // Persist progress so the next level is unlocked the next time the user signs in.
+        if (progressStore != null)
+        {
+            progressStore.RecordLevelCompleted(
+                userProfileKey,
+                isTeacher ? "teacher" : "student",
+                completedIndex);
+        }
 
         KidPopup.Show(this.client, "Great job!", CurrentLevel.Name + " completed!\n\nTime: " + elapsedSeconds.ToString("0.0") + " sec\nLearning rate: " + score + "%");
 
-        int nextLevel = currentLevelIndex + 1;
+        int nextLevel = completedIndex + 1;
         if (nextLevel < levels.Count)
         {
             StartLevel(nextLevel);
@@ -655,7 +1179,7 @@ namespace TuioDemoApp
         int average = 0;
         if (levelScores.Count > 0)
             average = (int)Math.Round(levelScores.Average());
-            
+
         KidPopup.Show(this.client, "You're a Star!", "All levels completed!\nAverage learning rate: " + average + "%\n\nGame will restart from Level 1.");
 
         levelScores.Clear();
@@ -782,6 +1306,7 @@ namespace TuioDemoApp
         DrawHud(g);
         DrawRadialMenu(g);
         DrawBluetoothPairingPanel(g);
+        DrawGestureOutsideRadialOverlay(g);
     }
 
     private void InitializeBluetoothPairing()
@@ -915,11 +1440,11 @@ namespace TuioDemoApp
                     break;
                 }
 
-                string stateText = "Not connected";
+                string stateText = "Existing";
                 SolidBrush stateBrush = disconnectedBrush;
                 if (device.IsConnected)
                 {
-                    stateText = "Connected";
+                    stateText = "Detected";
                     stateBrush = connectedBrush;
                 }
 
@@ -1012,6 +1537,7 @@ namespace TuioDemoApp
     {
         if (!radialMenuOpen)
         {
+            TickCloseButtonGestureDwell();
             return;
         }
 
@@ -1179,6 +1705,7 @@ namespace TuioDemoApp
 
     private void OpenRadialMenuLayer1()
     {
+        bool wasClosed = !radialMenuOpen;
         radialMenuOpen = true;
         radialLayer = "layer1";
         radialSubMode = "";
@@ -1193,11 +1720,21 @@ namespace TuioDemoApp
         radialHoveredIndex = -1;
         radialHoverSince = DateTime.MinValue;
         radialSelectionLocked = false;
+        closeGestureHoverSince = DateTime.MinValue;
+        if (wasClosed)
+        {
+            lock (evalLock)
+            {
+                evalRadialOpens++;
+            }
+        }
         Invalidate();
     }
 
     private void CloseRadialMenu()
     {
+        if (!radialMenuOpen)
+            return;
         radialMenuOpen = false;
         radialLayer = "none";
         radialSubMode = "";
@@ -1206,6 +1743,11 @@ namespace TuioDemoApp
         radialHoveredIndex = -1;
         radialHoverSince = DateTime.MinValue;
         radialSelectionLocked = false;
+        lock (evalLock)
+        {
+            evalRadialCloses++;
+        }
+        closeGestureHoverSince = DateTime.MinValue;
         Invalidate();
     }
 
@@ -1227,8 +1769,18 @@ namespace TuioDemoApp
         radialLabels.Clear();
         radialLabels.Add("Back");
         radialLabels.Add("Restart Level");
-        radialLabels.Add("Go to Level 1");
-        radialLabels.Add("Go to Level 2");
+
+        int unlocked = isTeacher
+            ? levels.Count
+            : progressStore.UnlockedLevels(userProfileKey, levels.Count);
+
+        for (int i = 0; i < levels.Count; i++)
+        {
+            if (i < unlocked)
+                radialLabels.Add("Go to Level " + (i + 1));
+            else
+                radialLabels.Add("Locked - Level " + (i + 1));
+        }
     }
 
     private void BuildRadialLayer2Audio()
@@ -1377,15 +1929,20 @@ namespace TuioDemoApp
             StartLevel(currentLevelIndex);
             return;
         }
-        if (label == "Go to Level 1")
+
+        const string lockedPrefix = "Locked - Level ";
+        if (label.StartsWith(lockedPrefix, StringComparison.Ordinal))
         {
-            StartLevel(0);
+            SpeakSentence("This level is locked. Finish the earlier levels first.");
             return;
         }
-        if (label == "Go to Level 2")
+
+        const string gotoPrefix = "Go to Level ";
+        if (label.StartsWith(gotoPrefix, StringComparison.Ordinal) &&
+            int.TryParse(label.Substring(gotoPrefix.Length).Trim(), out int lvl) &&
+            lvl >= 1 && lvl <= levels.Count)
         {
-            StartLevel(1);
-            return;
+            StartLevel(lvl - 1);
         }
     }
 
@@ -1784,7 +2341,7 @@ namespace TuioDemoApp
                 } // End if easier
             } // End if !slot.IsPlaced
 
-            string checkSuffix = slot.IsPlaced ? " ✓" : "";
+            string checkSuffix = slot.IsPlaced ? " (placed)" : "";
             string status = slot.ObjectName + checkSuffix;
             SizeF labelSize = g.MeasureString(status, smallFont);
 
@@ -1930,14 +2487,21 @@ namespace TuioDemoApp
 
         int placedCount = CurrentLevel.Targets.Count(t => t.IsPlaced);
         int totalCount = CurrentLevel.Targets.Count;
-        double elapsed = (DateTime.Now - levelStartTime).TotalSeconds;
+        double elapsed = levelStopwatch.IsRunning ? levelStopwatch.Elapsed.TotalSeconds : 0.0;
 
         string line1 = CurrentLevel.Name + "  |  Stars: " + placedCount + "/" + totalCount;
         string line2 = "Time: " + elapsed.ToString("0.0") + " sec  |  Place objects in the matching silhouettes!";
         string line3 = "Magic Hands: circle=open | square=close | open_hand=select | triangle=Bluetooth menu";
+        if (radialGestureMode)
+            line3 += "  Corner X: hold index ~1 sec to quit.";
+
+        string adaptiveHint = null;
+        bool showAdaptiveHint = TryGetAdaptivePlacementHint(out adaptiveHint);
+
+        float hudHeight = showAdaptiveHint ? 128f : (radialGestureMode ? 110f : 95f);
 
         // Draw Bubbly HUD
-        RectangleF hudRect = new RectangleF(15, 15, width - 30, 95);
+        RectangleF hudRect = new RectangleF(15, 15, width - 30, hudHeight);
         using (System.Drawing.Drawing2D.GraphicsPath path = GetRoundedRect(hudRect, 20))
         using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(200, 255, 255, 255)))
         using (Pen borderPen = new Pen(Color.FromArgb(255, 150, 200, 255), 6))
@@ -1946,16 +2510,66 @@ namespace TuioDemoApp
             g.DrawPath(borderPen, path);
         }
 
+        if (showAdaptiveHint)
+        {
+            RectangleF strip = new RectangleF(hudRect.X + 8, hudRect.Bottom - 34, hudRect.Width - 16, 28);
+            using (System.Drawing.Drawing2D.GraphicsPath stripPath = GetRoundedRect(strip, 12))
+            using (SolidBrush amber = new SolidBrush(Color.FromArgb(235, 255, 248, 220)))
+            using (Pen amberBorder = new Pen(Color.FromArgb(255, 230, 160, 60), 2))
+            {
+                g.FillPath(amber, stripPath);
+                g.DrawPath(amberBorder, stripPath);
+            }
+            using (var hintFont = new Font("Comic Sans MS", 11F, FontStyle.Bold))
+            using (var hintBrush = new SolidBrush(Color.FromArgb(255, 140, 75, 20)))
+            {
+                RectangleF hintTextRect = new RectangleF(strip.X + 10, strip.Y + 5, strip.Width - 20, strip.Height - 8);
+                g.DrawString(adaptiveHint, hintFont, hintBrush, hintTextRect);
+            }
+        }
+
         using (var darkFont = new Font("Comic Sans MS", 16F, FontStyle.Bold))
         using (var midFont = new Font("Comic Sans MS", 12F, FontStyle.Bold))
         {
             g.DrawString(line1, darkFont, Brushes.DarkSlateBlue, 30, 22);
-            g.DrawString(line2, midFont, Brushes.DarkSlateGray, 30, 55);
-            g.DrawString(line3, midFont, Brushes.DimGray, 30, 80);
+            g.DrawString(line2, midFont, Brushes.DarkSlateGray, 30, 52);
+            g.DrawString(line3, midFont, Brushes.DimGray, 30, 77);
+        }
+
+        // Gaze Drawing
+        if (currentGazePoint.X >= 0 && currentGazePoint.Y >= 0)
+        {
+            int gx = (int)(currentGazePoint.X * width);
+            int gy = (int)(currentGazePoint.Y * height);
+            using (Pen gazePen = new Pen(Color.FromArgb(100, 255, 255, 0), 4))
+            {
+                g.DrawEllipse(gazePen, gx - 15, gy - 15, 30, 30);
+            }
+            
+            // Highlight silhouette nearest to gaze
+            TargetSlot nearestSlot = null;
+            float minDist = float.MaxValue;
+            foreach (var slot in CurrentLevel.Targets)
+            {
+                if (slot.IsPlaced) continue;
+                float dx = (slot.XNormalized * width) - gx;
+                float dy = (slot.YNormalized * height) - gy;
+                float dist = (dx * dx) + (dy * dy);
+                if (dist < minDist) { minDist = dist; nearestSlot = slot; }
+            }
+            if (nearestSlot != null && minDist < 30000) // approx 170px radius
+            {
+                int sx = (int)(nearestSlot.XNormalized * width);
+                int sy = (int)(nearestSlot.YNormalized * height);
+                using (SolidBrush glowBrush = new SolidBrush(Color.FromArgb(50, 255, 255, 0)))
+                {
+                    g.FillEllipse(glowBrush, sx - 60, sy - 60, 120, 120);
+                }
+            }
         }
 
         // Emotion Indicator (Bubbly corner)
-        bool emotionRecent = (DateTime.Now - emotionLastUpdate).TotalSeconds < 10.0;
+        bool emotionRecent = (DateTime.Now - emotionLastUpdate).TotalSeconds < 14.0;
         if (emotionRecent && !string.IsNullOrEmpty(currentEmotionLabel))
         {
             Color hintColor;
@@ -1966,13 +2580,20 @@ namespace TuioDemoApp
                 default:       hintColor = Color.FromArgb(180, 180, 180); break; // Grey
             }
 
-            string emoji = "😐";
-            if (currentEmotionLabel == "happy") emoji = "😄";
-            if (currentEmotionLabel == "sad") emoji = "😢";
-            if (currentEmotionLabel == "angry") emoji = "😡";
-            if (currentEmotionLabel == "surprise") emoji = "😲";
-            
-            string emotionText = $"{emoji} {currentEmotionLabel.ToUpper()}";
+            string hintMsg = "";
+            string em = currentEmotionLabel.Trim().ToLowerInvariant();
+            if (em == "happy") { hintMsg = "Keep it up!"; }
+            else if (em == "sad") { hintMsg = "Cheer up, you got this!"; }
+            else if (em == "angry") { hintMsg = "Take a deep breath, we'll help."; }
+            else if (em == "surprise") { hintMsg = "Wow! Great job!"; }
+            else if (em == "fear") { hintMsg = "It's okay, try again!"; }
+            else if (em == "disgust") { hintMsg = "Let's make this simpler, check the hint."; }
+            else { hintMsg = "You're doing fine!"; }
+
+            string emotionText = "Mood: " + currentEmotionLabel.ToUpper() + "\n" + hintMsg;
+            string cornerTip = "";
+            if (TryGetAdaptivePlacementHint(out cornerTip))
+                emotionText += "\n\nTip: " + cornerTip;
 
             using (var emotionFont = new Font("Comic Sans MS", 14F, FontStyle.Bold))
             {
@@ -2027,11 +2648,14 @@ namespace TuioDemoApp
             width = this.ClientSize.Width;
             height = this.ClientSize.Height;
         }
+
+        LayoutCloseButton();
     }
 
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        LayoutCloseButton();
         if (this.ClientSize.Width > 0 && this.ClientSize.Height > 0)
         {
             width = this.ClientSize.Width;
@@ -2064,7 +2688,12 @@ namespace TuioDemoApp
         LoginForm login = new LoginForm(port);
         if (login.ShowDialog() == DialogResult.OK)
         {
-            Application.Run(new TuioDemo(port, login.UseRadialGestureMode));
+            var store = UserProgressStore.Load();
+            string profileKey = string.IsNullOrWhiteSpace(login.UserProfileKey)
+                ? (login.IsTeacher ? "teacher:default" : "student:default")
+                : login.UserProfileKey.Trim();
+            store.EnsureProfile(profileKey, login.IsTeacher ? "teacher" : "student");
+            Application.Run(new TuioDemo(port, login.UseRadialGestureMode, login.IsTeacher, profileKey, store));
         }
     }
 }
@@ -2133,6 +2762,7 @@ public class KidPopup : Form, TuioListener
     
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
+
         if (_client != null)
         {
             _client.removeTuioListener(this);
