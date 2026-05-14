@@ -55,42 +55,28 @@ namespace TuioDemoApp
             }
 
             string pythonExe = ResolvePythonExecutable(Path.GetDirectoryName(scriptPath));
-            // OpenCV GUI (cv2.imshow) needs a visible console/desktop context on Windows.
-            // CreateNoWindow=true often prevents the camera preview window from appearing.
+            // OpenCV highgui often fails to show a window when any standard stream is piped.
+            // Protocol lines are written to --result-file by Python; do not redirect stdout or stderr.
+            string resultPath = Path.Combine(Path.GetTempPath(), "tuio_face_login_result_" + Guid.NewGuid().ToString("N") + ".txt");
             var psi = new ProcessStartInfo
             {
                 FileName = pythonExe,
-                Arguments = "-u \"" + scriptPath + "\"",
+                Arguments = "-u \"" + scriptPath + "\" --result-file \"" + resultPath + "\"",
                 UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
+                RedirectStandardOutput = false,
+                RedirectStandardError = false,
                 CreateNoWindow = false,
                 WindowStyle = ProcessWindowStyle.Normal,
                 WorkingDirectory = Path.GetDirectoryName(scriptPath) ?? "",
             };
-
-            var stdoutBuf = new StringBuilder();
-            var stderrBuf = new StringBuilder();
 
             try
             {
                 using (var process = new Process())
                 {
                     process.StartInfo = psi;
-                    process.OutputDataReceived += (s, e) =>
-                    {
-                        if (e.Data == null) return;
-                        lock (stdoutBuf) stdoutBuf.AppendLine(e.Data);
-                    };
-                    process.ErrorDataReceived += (s, e) =>
-                    {
-                        if (e.Data == null) return;
-                        lock (stderrBuf) stderrBuf.AppendLine(e.Data);
-                    };
 
                     process.Start();
-                    process.BeginOutputReadLine();
-                    process.BeginErrorReadLine();
 
                     int waited = 0;
                     int stepMs = 250;
@@ -115,19 +101,35 @@ namespace TuioDemoApp
                             result.ErrorMessage = "Face login timed out (" + timeoutSeconds + "s).";
                         }
                     }
+                    try { process.WaitForExit(5000); } catch { }
                 }
             }
             catch (Exception ex)
             {
                 result.Kind = LoginKind.Error;
                 result.ErrorMessage = "Could not start python: " + ex.Message;
-                result.RawStdout = stdoutBuf.ToString();
-                result.RawStderr = stderrBuf.ToString();
+                result.RawStdout = "";
+                result.RawStderr = "";
                 return result;
             }
 
-            result.RawStdout = stdoutBuf.ToString();
-            result.RawStderr = stderrBuf.ToString();
+            try
+            {
+                if (File.Exists(resultPath))
+                {
+                    result.RawStdout = File.ReadAllText(resultPath, Encoding.UTF8);
+                    try { File.Delete(resultPath); } catch { }
+                }
+                else
+                {
+                    result.RawStdout = "";
+                }
+            }
+            catch
+            {
+                result.RawStdout = "";
+            }
+            result.RawStderr = "";
 
             // Don't override Cancelled set above.
             if (result.Kind == LoginKind.Unknown)
@@ -215,6 +217,10 @@ namespace TuioDemoApp
                     if (double.TryParse(ageStr, NumberStyles.Float, CultureInfo.InvariantCulture, out age))
                         result.AgeYears = age;
                 }
+                else if (line.StartsWith("ERR:", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(result.ErrorMessage))
+                {
+                    result.ErrorMessage = line.Substring("ERR:".Length).Trim();
+                }
             }
 
             if (string.IsNullOrEmpty(modeLine))
@@ -234,9 +240,13 @@ namespace TuioDemoApp
                 case "CANCEL":
                     result.Kind = LoginKind.Cancelled;
                     break;
+                case "ERROR":
+                    result.Kind = LoginKind.Error;
+                    break;
                 default:
                     result.Kind = LoginKind.Error;
-                    result.ErrorMessage = "Unrecognised MODE: " + modeLine;
+                    if (string.IsNullOrEmpty(result.ErrorMessage))
+                        result.ErrorMessage = "Unrecognised MODE: " + modeLine;
                     break;
             }
 

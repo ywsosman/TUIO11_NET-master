@@ -63,6 +63,11 @@ GESTURE_TEMPLATES_DEFAULT = os.path.join(_PROJECT_ROOT, "gesture_templates.json"
 # The OpenCV preview still draws the last boxes every frame via _yolo_overlay_boxes for a steady overlay.
 YOLO_INFERENCE_EVERY_FRAMES = 24
 
+# Webcam: smaller resolution + buffer=1 reduces latency and CPU. Landmarks stay normalized 0-1.
+# Override with --width/--height 0 to use the driver default resolution.
+_DEFAULT_CAPTURE_WIDTH = 640
+_DEFAULT_CAPTURE_HEIGHT = 480
+
 # C# radial menu mapping
 GESTURE_TO_RADIAL = {
     "circle": "pointer_up",
@@ -97,6 +102,64 @@ def resolve_yolo_model_path():
             p = os.path.join(base, rel)
             if os.path.isfile(p):
                 return p
+    return None
+
+
+def _configure_gesture_capture(cap, width, height):
+    """Smaller frame + buffer size 1 = less lag on Windows USB webcams."""
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+    if width is not None and int(width) > 0:
+        try:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        except Exception:
+            pass
+    if height is not None and int(height) > 0:
+        try:
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        except Exception:
+            pass
+    try:
+        cap.set(cv2.CAP_PROP_FPS, 30)
+    except Exception:
+        pass
+
+
+def open_gesture_camera(camera_id, width, height):
+    """
+    Try Windows backends (DSHOW first) then fall back.
+    Returns a configured cv2.VideoCapture or None.
+    """
+    if sys.platform == "win32":
+        backends = [
+            (cv2.CAP_DSHOW, "DSHOW"),
+            (cv2.CAP_MSMF, "MSMF"),
+            (cv2.CAP_ANY, "ANY"),
+        ]
+    else:
+        backends = [(cv2.CAP_ANY, "ANY")]
+
+    for backend, label in backends:
+        cap = cv2.VideoCapture(camera_id, backend)
+        if not cap.isOpened():
+            cap.release()
+            continue
+        ok, frame = cap.read()
+        if ok and frame is not None and frame.size > 0:
+            _configure_gesture_capture(cap, width, height)
+            size_desc = (
+                "driver default"
+                if not width or not height or int(width) <= 0 or int(height) <= 0
+                else f"{int(width)}x{int(height)}"
+            )
+            print(
+                f"[Server] Camera index {camera_id} ({label}), buffer=1, target size={size_desc}",
+                flush=True,
+            )
+            return cap
+        cap.release()
     return None
 
 
@@ -142,10 +205,26 @@ def load_templates(filepath=GESTURE_TEMPLATES_DEFAULT):
 
 
 class GestureServer:
-    def __init__(self, host="127.0.0.1", port=5000, camera_id=0, templates_path=None, body=False, debug=False):
+    def __init__(
+        self,
+        host="127.0.0.1",
+        port=5000,
+        camera_id=0,
+        templates_path=None,
+        body=False,
+        debug=False,
+        capture_width=None,
+        capture_height=None,
+    ):
         self.host = host
         self.port = port
         self.camera_id = camera_id
+        self.capture_width = (
+            _DEFAULT_CAPTURE_WIDTH if capture_width is None else capture_width
+        )
+        self.capture_height = (
+            _DEFAULT_CAPTURE_HEIGHT if capture_height is None else capture_height
+        )
         self.client_socket = None
         self.running = False
         self._debug = debug
@@ -313,8 +392,10 @@ class GestureServer:
         server_socket.settimeout(0.5)
         print(f"[Server] Listening on {self.host}:{self.port}", flush=True)
 
-        cap = cv2.VideoCapture(self.camera_id)
-        if not cap.isOpened():
+        cap = open_gesture_camera(
+            self.camera_id, self.capture_width, self.capture_height
+        )
+        if cap is None:
             print("[Server] ERROR: Could not open camera", flush=True)
             self.running = False
             return
@@ -533,6 +614,18 @@ def main():
     parser.add_argument("--templates", default=None, help="Path to gesture_templates.json")
     parser.add_argument("--body", action="store_true", help="Use holistic_landmarker (pose+hands) instead of hand only")
     parser.add_argument("--debug", action="store_true", help="Print recognition attempts")
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=_DEFAULT_CAPTURE_WIDTH,
+        help="Capture width (0 = driver default; lower = faster). Default %(default)s.",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=_DEFAULT_CAPTURE_HEIGHT,
+        help="Capture height (0 = driver default). Default %(default)s.",
+    )
     args = parser.parse_args()
     server = GestureServer(
         host=args.host,
@@ -541,6 +634,8 @@ def main():
         templates_path=args.templates,
         body=args.body,
         debug=args.debug,
+        capture_width=args.width,
+        capture_height=args.height,
     )
     try:
         server.run()
