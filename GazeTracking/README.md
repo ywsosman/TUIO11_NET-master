@@ -1,30 +1,79 @@
-# Eye Gaze Estimation using Webcam
+# Eye Tracking - Simple & Reliable
 
-Based on the Medium article by Amit Aflalo and GitHub: amitt1236/Gaze_estimation
+## Quick Start
 
-## Requirements
-```
-pip install opencv-python mediapipe numpy
-```
-
-## Usage
 ```bash
-python main.py
+cd GazeTracking
+python main.py --camera 0
 ```
 
-## How it works
-1. Uses MediaPipe Face Mesh for 468 facial landmarks
-2. Uses solvePnP for head pose estimation  
-3. Uses estimateAffine3D to project 2D pupil to 3D
-4. Calculates gaze direction accounting for head movement
+If camera 0 doesn't work, try `--camera 1`.
 
-## Camera
-Change camera index in main.py:
-- `cap = cv2.VideoCapture(0)` for default camera
-- `cap = cv2.VideoCapture(1)` for second camera
+---
+
+## What It Does
+
+- **Tracks both eyes** using MediaPipe FaceLandmarker
+- **Shows quadrant position** (left/center/right + up/mid/down)
+- **Detects blinking** (holds last position during blink)
+- **Visual feedback** on screen
+
+---
+
+## Dependencies
+
+```
+pip install mediapipe opencv-python numpy
+```
+
+The `face_landmarker.task` model file is auto-downloaded.
+
+---
 
 ## Controls
-- Press ESC to exit
 
-## Original Article
-https://medium.com/mlearning-ai/eye-gaze-estimation-using-a-webcam-in-100-lines-of-code-570d4683fe23
+| Key | Action |
+|-----|--------|
+| `Q` | Quit |
+| `S` | Toggle smoothing (smooth/fast) |
+| `B` | Adjust blink threshold |
+
+---
+
+## Eye Data Output
+
+```json
+{
+  "face_detected": true,
+  "left_x": 180,
+  "left_y": 126,
+  "right_x": 157,
+  "right_y": 123,
+  "left_openness": 0.85,
+  "right_openness": 0.82,
+  "blink_state": "open",
+  "quadrant": "center-mid",
+  "gaze_x": 0.54,
+  "gaze_y": 0.48
+}
+```
+
+---
+
+## Quadrants
+
+```
+| UP-LEFT | UP-MID | UP-RIGHT |
+| MID-LEFT | CENTER | MID-RIGHT |
+| DOWN-LEFT | DOWN-MID | DOWN-RIGHT |
+```
+
+---
+
+## Files
+
+| File | Purpose |
+|------|---------|
+| `main.py` | Main demo |
+| `eye_tracker_simple.py` | Eye tracker class |
+| `face_landmarker.task` | MediaPipe model (auto-downloaded) |

@@ -3,6 +3,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy.spatial import distance
 import csv
+from pathlib import Path
 
 import mediapipe as mp
 from mediapipe.tasks import python
