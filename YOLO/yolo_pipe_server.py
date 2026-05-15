@@ -16,6 +16,8 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, asdict
 from ultralytics import YOLO
 
+from camera_utils import print_camera_list, resolve_camera
+
 import win32pipe
 import win32file
 import pywintypes
@@ -321,16 +323,24 @@ class YoloPipeServer:
 
 def main():
     import argparse
-    
-    parser = argparse.ArgumentParser(description='YOLO Named Pipe Server')
-    parser.add_argument('--pipe', type=str, default='YoloDetectorPipe', help='Pipe name')
-    parser.add_argument('--model', type=str, default='yolo26m.pt', help='YOLO model path')
-    parser.add_argument('--conf', type=float, default=0.35, help='Confidence threshold')
-    parser.add_argument('--iou', type=float, default=0.45, help='IoU threshold')
-    parser.add_argument('--fps', type=int, default=15, help='Max FPS')
-    parser.add_argument('--no-tracking', action='store_true', help='Disable SORT tracking')
+
+    parser = argparse.ArgumentParser(description="YOLO Named Pipe Server")
+    parser.add_argument("--pipe", type=str, default="YoloDetectorPipe", help="Pipe name")
+    parser.add_argument("--model", type=str, default="yolo26m.pt", help="YOLO model path")
+    parser.add_argument("--conf", type=float, default=0.35, help="Confidence threshold")
+    parser.add_argument("--iou", type=float, default=0.45, help="IoU threshold")
+    parser.add_argument("--fps", type=int, default=15, help="Max FPS")
+    parser.add_argument("--no-tracking", action="store_true", help="Disable SORT tracking")
+    parser.add_argument(
+        "--list-cameras", action="store_true",
+        help="List all detected cameras and exit.",
+    )
     args = parser.parse_args()
-    
+
+    if args.list_cameras:
+        print_camera_list()
+        return
+
     print("=" * 60)
     print("YOLO Named Pipe Server")
     print("=" * 60)
@@ -341,16 +351,16 @@ def main():
     print(f"Max FPS: {args.fps}")
     print(f"Tracking: {not args.no_tracking}")
     print("=" * 60)
-    
+
     server = YoloPipeServer(
         pipe_name=args.pipe,
         model_path=args.model,
         conf_threshold=args.conf,
         iou_threshold=args.iou,
         max_fps=args.fps,
-        tracking_enabled=not args.no_tracking
+        tracking_enabled=not args.no_tracking,
     )
-    
+
     try:
         server.run()
     except KeyboardInterrupt:
