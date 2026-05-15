@@ -27,15 +27,28 @@ sys.path.insert(0, str(Path(__file__).parent))
 from gaze_tracker import create_tracker, GazeAPI
 from gaze_filter import create_gaze_filter
 from calibrate import run_calibration_wizard
+from camera_utils import resolve_camera, print_camera_list
 
 
 class GazePipeServer:
-    def __init__(self, pipe_name: str = "GazeTrackerPipe", camera: int = 0):
+    def __init__(
+        self,
+        pipe_name: str = "GazeTrackerPipe",
+        camera: int = 0,
+        prefer_splitcam: bool = False,
+    ):
         self.pipe_name = pipe_name
-        self.camera = camera
         self.running = False
-        
-        self.tracker = create_tracker(camera=camera, api="legacy")
+
+        # --- camera resolution ---
+        self.camera, cam_name = resolve_camera(
+            requested=camera,
+            prefer_splitcam=prefer_splitcam,
+            fallback_any=True,
+        )
+        print(f"[GAZE] Camera resolved to [{self.camera}] {cam_name}", flush=True)
+
+        self.tracker = create_tracker(camera=self.camera, api="legacy")
         self.gaze_filter = create_gaze_filter("kalman", strength=0.5)
         
         self.current_gaze = {"x": 0.5, "y": 0.5, "raw_x": 0.5, "raw_y": 0.5,
@@ -229,27 +242,43 @@ class GazePipeServer:
 
 def main():
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Gaze Tracking Pipe Server')
-    parser.add_argument('--pipe', type=str, default='GazeTrackerPipe', help='Pipe name')
-    parser.add_argument('--camera', type=int, default=0, help='Camera index')
-    parser.add_argument('--no-visual', action='store_true', help='Pipe only mode')
-    parser.add_argument('--load-cal', type=str, help='Load calibration file')
+
+    parser = argparse.ArgumentParser(description="Gaze Tracking Pipe Server")
+    parser.add_argument("--pipe", type=str, default="GazeTrackerPipe", help="Pipe name")
+    parser.add_argument("--camera", type=int, default=0, help="Camera index")
+    parser.add_argument(
+        "--splitcam", action="store_true",
+        help="Prefer SplitCam / any virtual camera over the default webcam.",
+    )
+    parser.add_argument(
+        "--list-cameras", action="store_true",
+        help="List all detected cameras and exit.",
+    )
+    parser.add_argument("--no-visual", action="store_true", help="Pipe-only mode (no preview window)")
+    parser.add_argument("--load-cal", type=str, help="Load calibration file on startup")
     args = parser.parse_args()
-    
+
+    if args.list_cameras:
+        print_camera_list()
+        return
+
     print("=" * 50)
     print("GAZE TRACKING PIPE SERVER")
     print("=" * 50)
-    print(f"Pipe: {args.pipe}")
-    print(f"Camera: {args.camera}")
+    print(f"Pipe   : {args.pipe}")
+    print(f"Camera : {args.camera}  (--splitcam={args.splitcam})")
     print("=" * 50)
-    
-    server = GazePipeServer(pipe_name=args.pipe, camera=args.camera)
-    
+
+    server = GazePipeServer(
+        pipe_name=args.pipe,
+        camera=args.camera,
+        prefer_splitcam=args.splitcam,
+    )
+
     if args.load_cal:
         server.tracker.load_calibration(args.load_cal)
-        print(f"Loaded calibration: {args.load_cal}")
-    
+        print(f"[GAZE] Loaded calibration: {args.load_cal}")
+
     try:
         server.run(visual_mode=not args.no_visual)
     except KeyboardInterrupt:

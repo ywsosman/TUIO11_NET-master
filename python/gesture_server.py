@@ -20,6 +20,14 @@ import threading
 import time
 from collections import deque
 
+from camera_utils import (
+    enumerate_cameras,
+    find_splitcam,
+    find_default_camera,
+    resolve_camera,
+    print_camera_list,
+)
+
 import numpy as np
 
 try:
@@ -127,11 +135,19 @@ def _configure_gesture_capture(cap, width, height):
         pass
 
 
-def open_gesture_camera(camera_id, width, height):
+def open_gesture_camera(camera_id, width, height, prefer_splitcam=False):
     """
-    Try Windows backends (DSHOW first) then fall back.
+    Resolve the best available camera (SplitCam-aware), then open it.
+    Falls back through Windows backends (DSHOW → MSMF → ANY).
     Returns a configured cv2.VideoCapture or None.
     """
+    # --- camera selection (may override camera_id with SplitCam index) ---
+    resolved_id, cam_name = resolve_camera(
+        requested=camera_id,
+        prefer_splitcam=prefer_splitcam,
+        fallback_any=True,
+    )
+
     if sys.platform == "win32":
         backends = [
             (cv2.CAP_DSHOW, "DSHOW"),
@@ -142,7 +158,7 @@ def open_gesture_camera(camera_id, width, height):
         backends = [(cv2.CAP_ANY, "ANY")]
 
     for backend, label in backends:
-        cap = cv2.VideoCapture(camera_id, backend)
+        cap = cv2.VideoCapture(resolved_id, backend)
         if not cap.isOpened():
             cap.release()
             continue
@@ -155,11 +171,13 @@ def open_gesture_camera(camera_id, width, height):
                 else f"{int(width)}x{int(height)}"
             )
             print(
-                f"[Server] Camera index {camera_id} ({label}), buffer=1, target size={size_desc}",
+                f"[Server] Opened '{cam_name}' index={resolved_id} ({label}), "
+                f"buffer=1, target size={size_desc}",
                 flush=True,
             )
             return cap
         cap.release()
+    print(f"[Server] ERROR: Could not open camera '{cam_name}' (index={resolved_id})", flush=True)
     return None
 
 
@@ -215,10 +233,12 @@ class GestureServer:
         debug=False,
         capture_width=None,
         capture_height=None,
+        prefer_splitcam=False,
     ):
         self.host = host
         self.port = port
         self.camera_id = camera_id
+        self.prefer_splitcam = prefer_splitcam
         self.capture_width = (
             _DEFAULT_CAPTURE_WIDTH if capture_width is None else capture_width
         )
@@ -306,16 +326,45 @@ class GestureServer:
         # Pixel-space boxes redrawn on preview every frame; updated only when YOLO runs.
         self._yolo_overlay_boxes = []
 
-        # Gaze Tracking
+        # Gaze Tracking — MediaPipe FaceMesh + Kalman filter (from GazeTracking/)
+        _gaze_dir = os.path.join(_PROJECT_ROOT, "GazeTracking")
+        if _gaze_dir not in sys.path:
+            sys.path.insert(0, _gaze_dir)
         try:
-            haar_path = cv2.data.haarcascades
-            self.face_cascade = cv2.CascadeClassifier(os.path.join(haar_path, 'haarcascade_frontalface_default.xml'))
-            self.eye_cascade = cv2.CascadeClassifier(os.path.join(haar_path, 'haarcascade_eye.xml'))
-            self.gaze_enabled = not self.face_cascade.empty() and not self.eye_cascade.empty()
-            print("[Server] Gaze Tracking loaded successfully.", flush=True)
+            from gaze_tracker import create_tracker as _create_gaze_tracker  # type: ignore[import]
+            from gaze_filter import create_gaze_filter as _create_gaze_filter  # type: ignore[import]
+
+            # If SplitCam is preferred, gaze uses the virtual cam independently;
+            # otherwise we inject the same frame already captured for hand tracking.
+            if prefer_splitcam:
+                from camera_utils import find_splitcam, enumerate_cameras
+                _cams = enumerate_cameras()
+                _sc = find_splitcam(_cams)
+                _gaze_cam_idx = _sc["index"] if (_sc and _sc["index"] != camera_id) else camera_id
+            else:
+                _gaze_cam_idx = camera_id
+
+            self._gaze_tracker = _create_gaze_tracker(camera=_gaze_cam_idx, api="legacy")
+            self._gaze_filter  = _create_gaze_filter("kalman", strength=0.5)
+
+            # Open a dedicated VideoCapture only when the gaze cam differs from
+            # the gesture cam (avoids fighting over the same device handle).
+            if prefer_splitcam and _gaze_cam_idx != camera_id:
+                _backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+                self._gaze_cap = cv2.VideoCapture(_gaze_cam_idx, _backend)
+                print(f"[Server] Gaze Tracking on dedicated camera index {_gaze_cam_idx} (SplitCam).", flush=True)
+            else:
+                self._gaze_cap = None  # reuse the gesture frame
+                print("[Server] Gaze Tracking sharing the gesture camera frame.", flush=True)
+
+            self.gaze_enabled = True
+            print("[Server] GazeTracker (MediaPipe FaceMesh + Kalman) loaded.", flush=True)
         except Exception as e:
             print(f"[Server] Gaze Tracking disabled: {e}", flush=True)
-            self.gaze_enabled = False
+            self._gaze_tracker = None
+            self._gaze_filter  = None
+            self._gaze_cap     = None
+            self.gaze_enabled  = False
 
     def _skeleton_from_hands(self, hand_landmarks, handedness=None):
         """Build cursor skeleton from hand index tips (C# expects right_wrist/left_wrist)."""
@@ -393,10 +442,13 @@ class GestureServer:
         print(f"[Server] Listening on {self.host}:{self.port}", flush=True)
 
         cap = open_gesture_camera(
-            self.camera_id, self.capture_width, self.capture_height
+            self.camera_id,
+            self.capture_width,
+            self.capture_height,
+            prefer_splitcam=self.prefer_splitcam,
         )
         if cap is None:
-            print("[Server] ERROR: Could not open camera", flush=True)
+            print("[Server] ERROR: Could not open any camera", flush=True)
             self.running = False
             return
 
@@ -552,31 +604,33 @@ class GestureServer:
                         cv2.LINE_AA,
                     )
 
-                # Gaze tracking every 2 frames
+                # Gaze tracking (MediaPipe FaceMesh + Kalman) every 2 frames
                 if self.gaze_enabled and frame_count % 2 == 0:
                     try:
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        faces = self.face_cascade.detectMultiScale(gray, 1.3, 5)
-                        if len(faces) > 0:
-                            fx, fy, fw, fh = faces[0]
-                            roi = gray[fy:fy+fh, fx:fx+fw]
-                            eyes = self.eye_cascade.detectMultiScale(roi, 1.1, 5)
-                            cx, cy = 0, 0
-                            if len(eyes) >= 2:
-                                ex1, ey1, ew1, eh1 = eyes[0]
-                                ex2, ey2, ew2, eh2 = eyes[1]
-                                cx = fx + (ex1 + ew1//2 + ex2 + ew2//2) // 2
-                                cy = fy + (ey1 + eh1//2 + ey2 + eh2//2) // 2
-                            elif len(eyes) == 1:
-                                ex, ey, ew, eh = eyes[0]
-                                cx = fx + ex + ew//2
-                                cy = fy + ey + eh//2
-                            if cx > 0 and cy > 0:
-                                msg["gaze"] = {"x": cx / w, "y": cy / h}
-                                cv2.circle(display_frame, (cx, cy), 15, (255, 255, 0), 2)
-                                cv2.putText(display_frame, "Gaze", (cx-20, cy-20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                        # Use dedicated SplitCam frame if available, else share gesture frame
+                        if self._gaze_cap is not None and self._gaze_cap.isOpened():
+                            ret_g, gaze_frame = self._gaze_cap.read()
+                            if not ret_g or gaze_frame is None:
+                                gaze_frame = frame
+                        else:
+                            gaze_frame = frame
+
+                        gaze_result = self._gaze_tracker.estimate_gaze(gaze_frame)
+                        if gaze_result.face_detected:
+                            sx, sy = self._gaze_filter.process(gaze_result.x, gaze_result.y)
+                            msg["gaze"] = {
+                                "x":     round(sx, 4),
+                                "y":     round(sy, 4),
+                                "yaw":   round(gaze_result.yaw, 4),
+                                "pitch": round(gaze_result.pitch, 4),
+                            }
+                            gx, gy = int(sx * w), int(sy * h)
+                            cv2.circle(display_frame, (gx, gy), 15, (255, 255, 0), 2)
+                            cv2.putText(display_frame, "Gaze", (gx - 20, gy - 20),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
                     except Exception as e:
-                        pass
+                        if self._debug:
+                            print(f"[Server] Gaze error: {e}", flush=True)
 
                 status = "Tracking" if msg["skeleton"] else "Move into frame..."
                 cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -597,6 +651,8 @@ class GestureServer:
                 frame_count += 1
         finally:
             cap.release()
+            if self._gaze_cap is not None:
+                self._gaze_cap.release()
             cv2.destroyAllWindows()
             server_socket.close()
             self.hand_landmarker.close()
@@ -607,13 +663,29 @@ class GestureServer:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Gesture Server – MediaPipe Hands + DollarPy recognizer."
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument(
+        "--camera", type=int, default=0,
+        help="Camera index to use (default: 0).",
+    )
+    parser.add_argument(
+        "--splitcam", action="store_true",
+        help="Prefer SplitCam (or any virtual camera) over the default webcam.",
+    )
+    parser.add_argument(
+        "--list-cameras", action="store_true",
+        help="List all detected cameras and exit.",
+    )
     parser.add_argument("--templates", default=None, help="Path to gesture_templates.json")
-    parser.add_argument("--body", action="store_true", help="Use holistic_landmarker (pose+hands) instead of hand only")
-    parser.add_argument("--debug", action="store_true", help="Print recognition attempts")
+    parser.add_argument(
+        "--body", action="store_true",
+        help="Use holistic_landmarker (pose+hands) instead of hand only.",
+    )
+    parser.add_argument("--debug", action="store_true", help="Print recognition attempts.")
     parser.add_argument(
         "--width",
         type=int,
@@ -627,6 +699,11 @@ def main():
         help="Capture height (0 = driver default). Default %(default)s.",
     )
     args = parser.parse_args()
+
+    if args.list_cameras:
+        print_camera_list()
+        return
+
     server = GestureServer(
         host=args.host,
         port=args.port,
@@ -636,6 +713,7 @@ def main():
         debug=args.debug,
         capture_width=args.width,
         capture_height=args.height,
+        prefer_splitcam=args.splitcam,
     )
     try:
         server.run()
