@@ -28,6 +28,8 @@ namespace TuioDemoApp
         {
             public LoginKind Kind = LoginKind.Unknown;
             public double? AgeYears;
+            /// <summary>Face-match confidence 0–100 %. Populated when Python emits CONFIDENCE:.</summary>
+            public double? Confidence;
             public string PersonDisplayName = "";
             public string ProfileKey = "";
             public string RawStdout = "";
@@ -177,6 +179,7 @@ namespace TuioDemoApp
             var sb = new StringBuilder();
             sb.AppendLine("=== Face login attempt @ " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ===");
             sb.AppendLine("Result: " + result.Kind +
+                (result.Confidence.HasValue ? "  Confidence=" + result.Confidence.Value.ToString("0.0") + "%" : "") +
                 (result.AgeYears.HasValue ? "  Age=" + result.AgeYears.Value.ToString("0.0") : "") +
                 (string.IsNullOrEmpty(result.ProfileKey) ? "" : " Profile=" + result.ProfileKey));
             sb.AppendLine("Python: " + pythonExe);
@@ -216,6 +219,13 @@ namespace TuioDemoApp
                     double age;
                     if (double.TryParse(ageStr, NumberStyles.Float, CultureInfo.InvariantCulture, out age))
                         result.AgeYears = age;
+                }
+                else if (line.StartsWith("CONFIDENCE:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string confStr = line.Substring("CONFIDENCE:".Length).Trim();
+                    double conf;
+                    if (double.TryParse(confStr, NumberStyles.Float, CultureInfo.InvariantCulture, out conf))
+                        result.Confidence = conf;
                 }
                 else if (line.StartsWith("ERR:", StringComparison.OrdinalIgnoreCase) && string.IsNullOrEmpty(result.ErrorMessage))
                 {

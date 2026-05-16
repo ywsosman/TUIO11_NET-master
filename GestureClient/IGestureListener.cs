@@ -14,6 +14,7 @@ namespace GestureClient
         void OnEmotionUpdate(string label, float confidence, string difficultyHint);
         void OnYoloDetection(IList<YoloObject> detections);
         void OnGazeUpdate(float x, float y);
+        void OnProximityUpdate(string status);
     }
 
     public class SkeletonLandmark

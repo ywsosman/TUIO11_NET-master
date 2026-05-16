@@ -75,6 +75,10 @@ for _extra_dir in (_GAZE_DIR, _YOLO_DIR):
 # The OpenCV preview still draws the last boxes every frame via _yolo_overlay_boxes for a steady overlay.
 YOLO_INFERENCE_EVERY_FRAMES = 24
 
+# Gaze: run FaceLandmarker every N frames. 1 = every frame (best cursor fidelity).
+# Raise to 2 on slow machines if the main loop lags.
+GAZE_EVERY_N_FRAMES = 1
+
 # Webcam: smaller resolution + buffer=1 reduces latency and CPU. Landmarks stay normalized 0-1.
 # Override with --width/--height 0 to use the driver default resolution.
 _DEFAULT_CAPTURE_WIDTH = 640
@@ -97,6 +101,7 @@ def get_model_path(filename):
     urls = {
         "hand_landmarker.task": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
         "holistic_landmarker.task": "https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task",
+        "face_landmarker.task": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
     }
     if filename in urls:
         path = os.path.join(_PROJECT_ROOT, filename)
@@ -108,8 +113,19 @@ def get_model_path(filename):
 
 
 def resolve_yolo_model_path():
-    """Prefer local yolo26m.pt; fall back so YOLO can still run if only small weights exist."""
-    for rel in ("yolo26m.pt", os.path.join("YOLO", "yolo26m.pt")):
+    """
+    Priority order:
+      1. fruit_best.pt  — custom-trained fruit model (produced by train_fruit_model.py)
+      2. yolo26m.pt     — local custom weights (COCO-based fallback)
+      3. None           — YOLO will auto-download yolo11n.pt (generic, no fruits)
+    """
+    candidates = [
+        "fruit_best.pt",
+        os.path.join("runs", "detect", "fruit_train", "weights", "best.pt"),
+        "yolo26m.pt",
+        os.path.join("YOLO", "yolo26m.pt"),
+    ]
+    for rel in candidates:
         for base in (_PROJECT_ROOT, _SCRIPT_DIR):
             p = os.path.join(base, rel)
             if os.path.isfile(p):
@@ -314,13 +330,33 @@ class GestureServer:
         self._sort_tracker = None
         try:
             from sort_tracker import SORTTracker
-            self._sort_tracker = SORTTracker(max_age=30, min_hits=3, iou_threshold=0.3)
+            self._sort_tracker = SORTTracker(max_age=30, min_hits=1, iou_threshold=0.3)
             print("[Server] SORT tracker loaded.", flush=True)
         except Exception as e:
             print(f"[Server] SORT tracker disabled (boxes won't have IDs): {e}", flush=True)
 
         # Pixel-space boxes redrawn on preview every frame; updated only when YOLO runs.
         self._yolo_overlay_boxes = []   # (x1, y1, x2, y2, class_name, conf, track_id)
+
+        # Object and Laser trackers for DollarPy
+        self.object_tracker = None
+        try:
+            from object_tracker import ObjectTracker
+            self.object_tracker = ObjectTracker()
+            print("[Server] ObjectTracker loaded for DollarPy.", flush=True)
+        except Exception as e:
+            print(f"[Server] ObjectTracker disabled: {e}", flush=True)
+            
+        self.laser_tracker = None
+        try:
+            from laser_tracker import LaserStrokeAccumulator, find_laser_blob
+            self.laser_tracker = LaserStrokeAccumulator()
+            self.find_laser_blob = find_laser_blob
+            self.laser_hsv_lower = np.array([160, 100, 100]) # default red
+            self.laser_hsv_upper = np.array([180, 255, 255])
+            print("[Server] LaserTracker loaded for DollarPy.", flush=True)
+        except Exception as e:
+            print(f"[Server] LaserTracker disabled: {e}", flush=True)
 
         # Gaze Tracking — MediaPipe FaceMesh + Kalman filter
         # Uses gaze_camera if specified (e.g. SplitCam); otherwise shares the gesture frame.
@@ -333,8 +369,11 @@ class GestureServer:
             from gaze_filter import create_gaze_filter as _create_gaze_filter
 
             _gaze_cam_idx = gaze_camera if gaze_camera is not None else camera_id
-            self._gaze_tracker = _create_gaze_tracker(camera=_gaze_cam_idx, api="legacy")
-            self._gaze_filter  = _create_gaze_filter("kalman", strength=0.5)
+            _face_model = get_model_path("face_landmarker.task")
+            self._gaze_tracker = _create_gaze_tracker(camera=_gaze_cam_idx, api="new", model_path=_face_model)
+            # OneEuroFilter: fast-moving → responsive (no lag), stationary → smooth (no jitter).
+            # Ideal for live cursor use. beta=0.07 adds speed-dependent cutoff boost.
+            self._gaze_filter  = _create_gaze_filter("euro", strength=0.7)
 
             # Open a dedicated capture only when gaze uses a different camera index.
             if gaze_camera is not None and gaze_camera != camera_id:
@@ -442,6 +481,8 @@ class GestureServer:
             return
 
         frame_count = 0
+        _gaze_face_hits = 0
+        _gaze_status_t  = time.time()
         try:
             while self.running:
                 if self.client_socket is None:
@@ -553,6 +594,7 @@ class GestureServer:
                 if msg["skeleton"] and self.recognizer and frame_count % 10 == 0 and len(self.gesture_points) >= 12:
                     gesture = self.try_recognize_gesture()
                     if gesture:
+                        gesture["source"] = "skeleton"
                         msg["gesture"] = gesture
                         tpl = gesture.get("_template", gesture["name"])
                         print(f"[Server] Matched: {tpl} -> {gesture['name']} (score={gesture['confidence']})", flush=True)
@@ -567,6 +609,7 @@ class GestureServer:
                         if results and len(results) > 0:
                             boxes = results[0].boxes
                             if boxes is not None and len(boxes) > 0:
+                                self.current_proximity = "ok"
                                 for box in boxes:
                                     xyxy = box.xyxy[0].cpu().numpy()
                                     conf = float(box.conf[0])
@@ -574,6 +617,13 @@ class GestureServer:
                                     class_name = results[0].names[cls]
                                     raw_dets.append([xyxy[0], xyxy[1], xyxy[2], xyxy[3], conf])
                                     det_meta.append(class_name)
+                                    
+                                    if class_name == "person":
+                                        area = ((xyxy[2] - xyxy[0]) * (xyxy[3] - xyxy[1])) / (w * h)
+                                        if area > 0.6:
+                                            self.current_proximity = "too_close"
+                                        elif area < 0.08:
+                                            self.current_proximity = "too_far"
 
                         # Run SORT to assign stable track IDs
                         overlay = []
@@ -594,6 +644,23 @@ class GestureServer:
                                                     "w": (tx2-tx1)/w,   "h": (ty2-ty1)/h,
                                                     "conf": round(best_conf, 3)})
                                 overlay.append((tx1, ty1, tx2, ty2, best_cls, best_conf, tid))
+                                
+                                # Update object tracker for DollarPy gestures
+                                if self.object_tracker:
+                                    cx, cy = (tx1+tx2)/2/w, (ty1+ty2)/2/h
+                                    self.object_tracker.update(tid, cx, cy, best_cls)
+                                    
+                                    if self.object_tracker.ready_for_recognition(tid) and self.recognizer:
+                                        stroke = self.object_tracker.get_stroke(tid)
+                                        if len(stroke) >= 5:
+                                            from dollarpy import Point
+                                            pts = [Point(p[0], p[1], 1) for p in stroke]
+                                            res = self.recognizer.recognize(pts)
+                                            if res and res[0] and res[1] > 0.4:
+                                                name = GESTURE_TO_RADIAL.get(res[0].name, res[0].name) if self._use_radial_mapping else res[0].name
+                                                msg["gesture"] = {"source": "object", "name": name, "confidence": round(res[1], 3), "track_id": tid}
+                                                print(f"[Server] Object Gesture Matched: {res[0].name} (score={res[1]:.2f})", flush=True)
+                                        self.object_tracker.mark_recognized(tid)
                         else:
                             # SORT unavailable — fall back to raw detections (no IDs)
                             for i, rd in enumerate(raw_dets):
@@ -610,6 +677,8 @@ class GestureServer:
                         if self._debug:
                             print(f"[Server] YOLO inference error: {e}", flush=True)
 
+                msg["proximity"] = getattr(self, "current_proximity", "ok")
+
                 for x1, y1, x2, y2, cname, yconf, tid in self._yolo_overlay_boxes:
                     cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
                     id_str = f"#{tid} " if tid >= 0 else ""
@@ -625,8 +694,8 @@ class GestureServer:
                         cv2.LINE_AA,
                     )
 
-                # Gaze tracking — MediaPipe FaceMesh + Kalman filter, every 2 frames
-                if self.gaze_enabled and frame_count % 2 == 0:
+                # Gaze tracking — MediaPipe FaceMesh + OneEuroFilter, every GAZE_EVERY_N_FRAMES frames
+                if self.gaze_enabled and frame_count % GAZE_EVERY_N_FRAMES == 0:
                     if self._gaze_evaluator:
                         self._gaze_evaluator.tick()
                     try:
@@ -640,7 +709,11 @@ class GestureServer:
 
                         gaze_result = self._gaze_tracker.estimate_gaze(gaze_frame)
                         if gaze_result.face_detected:
-                            sx, sy = self._gaze_filter.process(gaze_result.x, gaze_result.y)
+                            _gaze_face_hits += 1
+                            if time.time() - _gaze_status_t >= 5.0:
+                                print(f"[Gaze] Tracking OK — {_gaze_face_hits} samples so far", flush=True)
+                                _gaze_status_t = time.time()
+                            sx, sy = self._gaze_filter.process(gaze_result.x, gaze_result.y, time.time())
                             msg["gaze"] = {
                                 "x":     round(sx, 4),
                                 "y":     round(sy, 4),
@@ -658,8 +731,33 @@ class GestureServer:
                             if self._gaze_evaluator:
                                 self._gaze_evaluator.miss()
                     except Exception as e:
-                        if self._debug:
-                            print(f"[Server] Gaze error: {e}", flush=True)
+                        if not getattr(self, "_gaze_error_shown", False):
+                            print(f"[Server] Gaze error (first occurrence): {e}", flush=True)
+                            self._gaze_error_shown = True
+
+                # Laser Tracking
+                if getattr(self, "laser_tracker", None) is not None:
+                    laser_blob = self.find_laser_blob(frame, self.laser_hsv_lower, self.laser_hsv_upper)
+                    if laser_blob:
+                        cx, cy = laser_blob
+                        self.laser_tracker.update(cx, cy)
+                        # Draw preview
+                        cv2.circle(display_frame, (int(cx*w), int(cy*h)), 5, (0, 0, 255), -1)
+                        
+                        if self.laser_tracker.is_dwell():
+                            msg["gesture"] = {"source": "laser", "name": "tap", "confidence": 1.0, "x": cx, "y": cy}
+                            self.laser_tracker.clear()
+                        elif self.laser_tracker.ready_for_recognition() and self.recognizer:
+                            stroke = self.laser_tracker.get_stroke()
+                            if len(stroke) >= 5:
+                                from dollarpy import Point
+                                pts = [Point(p[0], p[1], 1) for p in stroke]
+                                res = self.recognizer.recognize(pts)
+                                if res and res[0] and res[1] > 0.4:
+                                    name = GESTURE_TO_RADIAL.get(res[0].name, res[0].name) if self._use_radial_mapping else res[0].name
+                                    msg["gesture"] = {"source": "laser", "name": name, "confidence": round(res[1], 3)}
+                                    print(f"[Server] Laser Gesture Matched: {res[0].name} (score={res[1]:.2f})", flush=True)
+                            self.laser_tracker.clear()
 
                 status = "Tracking" if msg["skeleton"] else "Move into frame..."
                 cv2.putText(display_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -716,6 +814,7 @@ def main():
         "--height", type=int, default=_DEFAULT_CAPTURE_HEIGHT,
         help="Capture height (0 = driver default). Default %(default)s.",
     )
+    parser.add_argument("--face-id", default=None, help="Face ID of the current player (used for adaptive hints).")
     args = parser.parse_args()
     server = GestureServer(
         host=args.host,
@@ -732,6 +831,14 @@ def main():
         server.run()
     except KeyboardInterrupt:
         server.running = False
+    finally:
+        if args.face_id:
+            try:
+                import gaze_adapter, emotion_adapter
+                gaze_adapter.generate_hints(args.face_id)
+                emotion_adapter.generate_hints(args.face_id)
+            except Exception as e:
+                print(f"[Server] Adaptive hints generation failed: {e}", flush=True)
 
 
 if __name__ == "__main__":

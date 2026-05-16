@@ -32,7 +32,7 @@ _PEOPLE_DIR = _SCRIPT_DIR / "people"
 _ROLES_PATH = _PEOPLE_DIR / "roles.tsv"
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-# When launched from TuioDemoApp ( --result-file ), OpenCV GUI breaks if stdout is
+# When launched from TuioDemoApp ( --result-file ), OpenCV GUI bretks if stdout is
 # redirected to a pipe; the host writes protocol lines here instead of parsing stdout.
 _RESULT_FILE: Optional[pathlib.Path] = None
 
@@ -53,8 +53,12 @@ def _emit_result(lines: List[str]) -> None:
 WINDOW_TITLE = "TUIO Face Login - Press Q"
 # Fewer consecutive agreeing frames -> quicker login once the match is stable
 _CONFIRMS = 6
-_FR_TOLERANCE = 0.55
-_DF_TOLERANCE = 0.56  # slightly looser for OpenFace embeddings vs old Facenet scale
+# 70 % confidence requirement:
+#   face_recognition: distance ≤ 0.30  →  confidence = (1 - dist)*100 ≥ 70 %
+#   DeepFace cosine:  distance ≤ 0.30  →  confidence = (1 - dist)*100 ≥ 70 %
+_MIN_CONFIDENCE = 70.0
+_FR_TOLERANCE = 0.30
+_DF_TOLERANCE = 0.30
 
 # Speed knobs (face_recognition / live loop)
 _FR_RESIZE = 0.2  # smaller = faster dlib work (was 0.25 in face.ipynb)
@@ -218,6 +222,7 @@ def _run_face_recognition_loop(fr, cap, known_encodings, known_labels, known_rol
     face_locations = []
     face_names: List[Tuple[str, str]] = []
     last_hud = "Align your face with the camera"
+    last_confidence = 0.0
     frame_n = 0
     inv_scale = 1.0 / _FR_RESIZE
 
@@ -247,37 +252,36 @@ def _run_face_recognition_loop(fr, cap, known_encodings, known_labels, known_rol
                 face_locations,
                 num_jitters=_FR_NUM_JITTERS,
             )
-            face_names = []
+            face_names = []      # List[Tuple[str, str, float]]  (name, role, confidence)
             hud = "No face detected"
             for face_encoding in encs:
-                matches = fr.compare_faces(
-                    known_encodings,
-                    face_encoding,
-                    tolerance=_FR_TOLERANCE,
-                )
                 dists = fr.face_distance(known_encodings, face_encoding)
                 best = int(np.argmin(dists))
-                if matches[best]:
-                    name = known_labels[best]
-                    role = known_roles[best]
-                    face_names.append((name, role))
+                confidence = max(0.0, (1.0 - float(dists[best])) * 100.0)
+                if confidence >= _MIN_CONFIDENCE:
+                    face_names.append((known_labels[best], known_roles[best], confidence))
                 else:
-                    face_names.append(("Unknown", "student"))
+                    face_names.append(("Unknown", "student", confidence))
 
             if not encs:
                 confirmations.append(None)
             else:
                 areas = [(b - t) * (r - l) for (t, r, b, l) in face_locations]
                 pick = int(np.argmax(areas)) if areas else 0
-                name, rk = face_names[pick] if pick < len(face_names) else ("Unknown", "student")
-                hud = name if name != "Unknown" else "Unknown - move closer or improve light"
-                confirmations.append((name, rk) if name != "Unknown" else None)
+                name, rk, conf = face_names[pick] if pick < len(face_names) else ("Unknown", "student", 0.0)
+                if name != "Unknown":
+                    last_confidence = conf
+                    hud = f"{name} ({last_confidence:.0f}%)"
+                    confirmations.append((name, rk))
+                else:
+                    hud = f"Low confidence ({conf:.0f}%) - move closer or improve light"
+                    confirmations.append(None)
             last_hud = hud
 
         if len(face_names) != len(face_locations):
-            face_names = [("Unknown", "student")] * len(face_locations)
+            face_names = [("Unknown", "student", 0.0)] * len(face_locations)
 
-        for (top, right, bottom, left), (nm, _) in zip(face_locations, face_names):
+        for (top, right, bottom, left), (nm, _rk, _conf) in zip(face_locations, face_names):
             ti = int(round(top * inv_scale))
             ri = int(round(right * inv_scale))
             bi = int(round(bottom * inv_scale))
@@ -309,6 +313,7 @@ def _run_face_recognition_loop(fr, cap, known_encodings, known_labels, known_rol
                     f"PERSON:{who}",
                     f"PROFILE:{kind}:{_slug_key(who)}",
                     f"MODE:{'RADIAL' if kind == 'teacher' else 'GAME'}",
+                    f"CONFIDENCE:{last_confidence:.1f}",
                 ]
             )
             cap.release()
@@ -439,6 +444,7 @@ def _run_deepface_login(imgs, roles) -> int:
     confirmations = collections.deque(maxlen=_CONFIRMS)
     frame_n = 0
     last_emb: Optional[np.ndarray] = None
+    last_confidence = 0.0
 
     while True:
         ok, frame = cap.read()
@@ -489,13 +495,15 @@ def _run_deepface_login(imgs, roles) -> int:
                     d = _cos_dist(emb, k)
                     if d < best_d:
                         best_d, best_i = d, i
-                if best_d <= _DF_TOLERANCE:
+                confidence = max(0.0, (1.0 - best_d) * 100.0)
+                if confidence >= _MIN_CONFIDENCE:
                     nm, rk = labels[best_i], rfs[best_i]
-                    hud = f"{nm} ({best_d:.2f})"
+                    last_confidence = confidence
+                    hud = f"{nm} ({confidence:.0f}%)"
                     confirmations.append((nm, rk))
                 else:
                     confirmations.append(None)
-                    hud = f"? ({best_d:.2f})"
+                    hud = f"Low confidence ({confidence:.0f}%) - adjust position"
         else:
             last_emb = None
             confirmations.append(None)
@@ -513,6 +521,7 @@ def _run_deepface_login(imgs, roles) -> int:
                     f"PERSON:{who}",
                     f"PROFILE:{kind}:{_slug_key(who)}",
                     f"MODE:{'RADIAL' if kind == 'teacher' else 'GAME'}",
+                    f"CONFIDENCE:{last_confidence:.1f}",
                 ]
             )
             cap.release()
