@@ -1036,44 +1036,12 @@ namespace TuioDemoApp
     {
         shuttingDown = true;
 
-        string jsonPath = SaveEvaluationArtifacts();
-
-        if (!string.IsNullOrEmpty(jsonPath))
-        {
-            string folder = Path.GetDirectoryName(jsonPath) ?? "";
-            DialogResult answer = MessageBox.Show(
-                this,
-                "Session evaluation was saved.\r\n\r\n"
-                + "JSON:\r\n"
-                + jsonPath
-                + "\r\n\r\n"
-                + "The gaze heatmap PNG is in the same folder (matching date stamp).\r\n\r\n"
-                + "Open this folder in File Explorer?",
-                "Evaluation saved",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Information);
-
-            if (answer == DialogResult.Yes && !string.IsNullOrEmpty(folder))
-            {
-                try
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = folder,
-                        UseShellExecute = true
-                    });
-                }
-                catch
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = "explorer.exe",
-                        Arguments = "\"" + folder + "\"",
-                        UseShellExecute = true
-                    });
-                }
-            }
-        }
+        // NOTE: The C# session-evaluation export to Documents\TUIO_Evaluation
+        // has been removed. The Python GazeEvaluator already writes a richer
+        // report (heatmap + scanpath + markdown) to gaze_reports/session_*/
+        // on the same session-end, so this was duplicate work plus a noisy
+        // "open folder?" popup. Per-user progress.txt and face_login.log
+        // still live in Documents\TUIO_Evaluation — those are intentional.
 
         animationTimer.Stop();
         radialTimer.Stop();

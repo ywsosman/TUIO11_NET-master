@@ -118,10 +118,20 @@ class GazeEvaluator:
         print(f"[GazeEval] Saving report to: {self.output_dir}", flush=True)
 
         stats = self._compute_stats()
-        self._save_json(stats)
-        self._save_heatmap()
-        self._save_scanpath()
-        self._save_markdown(stats)
+
+        # Each artefact is wrapped so a failure in one doesn't skip the rest.
+        # Symptoms before this guard: only gaze_log.json appeared because the
+        # heatmap routine threw / hung and aborted save_report() midway.
+        for name, fn in [
+            ("gaze_log.json",     lambda: self._save_json(stats)),
+            ("gaze_heatmap.png",  lambda: self._save_heatmap()),
+            ("gaze_scanpath.png", lambda: self._save_scanpath()),
+            ("gaze_report.md",    lambda: self._save_markdown(stats)),
+        ]:
+            try:
+                fn()
+            except Exception as ex:
+                print(f"[GazeEval] {name} FAILED: {ex}", flush=True)
 
         print(f"[GazeEval] Report saved  ({len(self._samples)} samples, "
               f"{stats['duration_s']:.1f}s session)", flush=True)
@@ -239,40 +249,37 @@ class GazeEvaluator:
         print(f"[GazeEval]   gaze_log.json      ({os.path.getsize(path)//1024} KB)", flush=True)
 
     def _save_heatmap(self) -> None:
+        """
+        Build a 2-D gaussian heat-map of gaze density using a single
+        cv2.GaussianBlur on a sparse hit-canvas. This runs in tens of
+        milliseconds even for tens of thousands of samples — the previous
+        per-sample Python loop took minutes and was the reason long
+        sessions only produced gaze_log.json before the user closed
+        the server.
+        """
         W, H = self.canvas_w, self.canvas_h
-        accum = np.zeros((H, W), dtype=np.float32)
+        sigma = max(W, H) / 20.0   # ~5% of canvas
 
-        sigma = max(W, H) // 20   # ~5% of canvas
-
+        # 1. Mark every gaze sample as a single hit pixel
+        hits = np.zeros((H, W), dtype=np.float32)
         for s in self._samples:
             px = int(np.clip(s["x"], 0, 1) * (W - 1))
             py = int(np.clip(s["y"], 0, 1) * (H - 1))
-            x0 = max(0, px - sigma * 2)
-            x1 = min(W, px + sigma * 2 + 1)
-            y0 = max(0, py - sigma * 2)
-            y1 = min(H, py + sigma * 2 + 1)
-            for iy in range(y0, y1):
-                for ix in range(x0, x1):
-                    d2 = (ix - px) ** 2 + (iy - py) ** 2
-                    accum[iy, ix] += math.exp(-d2 / (2 * sigma * sigma))
+            hits[py, px] += 1.0
 
-        # Vectorised version (faster for large datasets, numpy only)
-        # The loop above is correct but slow; override with fast version:
-        accum = np.zeros((H, W), dtype=np.float32)
-        gx = np.arange(W, dtype=np.float32)
-        gy = np.arange(H, dtype=np.float32)
-        GX, GY = np.meshgrid(gx, gy)
-        sig2 = 2.0 * sigma * sigma
-        for s in self._samples:
-            px = np.clip(s["x"], 0, 1) * (W - 1)
-            py = np.clip(s["y"], 0, 1) * (H - 1)
-            accum += np.exp(-((GX - px) ** 2 + (GY - py) ** 2) / sig2)
+        # 2. Blur once → continuous density field
+        accum = cv2.GaussianBlur(hits, ksize=(0, 0), sigmaX=sigma, sigmaY=sigma)
 
-        # Normalise and colour-map
-        accum = (accum / accum.max() * 255).astype(np.uint8)
+        # 3. Normalise to 0-255 with safe division
+        max_val = float(accum.max())
+        if max_val > 0:
+            accum = (accum / max_val * 255).astype(np.uint8)
+        else:
+            accum = accum.astype(np.uint8)
+
         heatmap = cv2.applyColorMap(accum, cv2.COLORMAP_JET)
 
-        # Draw 3×3 zone grid overlay
+        # 4. Draw 3×3 zone grid overlay (matches scanpath + report)
         for i in range(1, 3):
             cv2.line(heatmap, (W * i // 3, 0), (W * i // 3, H), (255, 255, 255), 1)
             cv2.line(heatmap, (0, H * i // 3), (W, H * i // 3), (255, 255, 255), 1)
