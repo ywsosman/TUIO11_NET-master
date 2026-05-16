@@ -20,15 +20,12 @@ import threading
 import time
 from collections import deque
 
-from camera_utils import (
-    enumerate_cameras,
-    find_splitcam,
-    find_default_camera,
-    resolve_camera,
-    print_camera_list,
-)
-
 import numpy as np
+
+try:
+    from gaze_evaluator import GazeEvaluator
+except ImportError:
+    GazeEvaluator = None  # report generation optional
 
 try:
     from face_emotion import FaceEmotionAnalyzer, draw_debug_overlay
@@ -66,6 +63,13 @@ POSE_LANDMARK_NAMES = [
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
 GESTURE_TEMPLATES_DEFAULT = os.path.join(_PROJECT_ROOT, "gesture_templates.json")
+
+# Add GazeTracking/ and YOLO/ to sys.path so their modules can be imported directly.
+_GAZE_DIR = os.path.join(_PROJECT_ROOT, "GazeTracking")
+_YOLO_DIR = os.path.join(_PROJECT_ROOT, "YOLO")
+for _extra_dir in (_GAZE_DIR, _YOLO_DIR):
+    if _extra_dir not in sys.path:
+        sys.path.insert(0, _extra_dir)
 
 # YOLO: inference every N frames (keep N well above ~5 so boxes are not jittery/disappearing every few frames).
 # The OpenCV preview still draws the last boxes every frame via _yolo_overlay_boxes for a steady overlay.
@@ -135,19 +139,11 @@ def _configure_gesture_capture(cap, width, height):
         pass
 
 
-def open_gesture_camera(camera_id, width, height, prefer_splitcam=False):
+def open_gesture_camera(camera_id, width, height):
     """
-    Resolve the best available camera (SplitCam-aware), then open it.
-    Falls back through Windows backends (DSHOW → MSMF → ANY).
+    Try Windows backends (DSHOW first) then fall back.
     Returns a configured cv2.VideoCapture or None.
     """
-    # --- camera selection (may override camera_id with SplitCam index) ---
-    resolved_id, cam_name = resolve_camera(
-        requested=camera_id,
-        prefer_splitcam=prefer_splitcam,
-        fallback_any=True,
-    )
-
     if sys.platform == "win32":
         backends = [
             (cv2.CAP_DSHOW, "DSHOW"),
@@ -158,7 +154,7 @@ def open_gesture_camera(camera_id, width, height, prefer_splitcam=False):
         backends = [(cv2.CAP_ANY, "ANY")]
 
     for backend, label in backends:
-        cap = cv2.VideoCapture(resolved_id, backend)
+        cap = cv2.VideoCapture(camera_id, backend)
         if not cap.isOpened():
             cap.release()
             continue
@@ -171,13 +167,11 @@ def open_gesture_camera(camera_id, width, height, prefer_splitcam=False):
                 else f"{int(width)}x{int(height)}"
             )
             print(
-                f"[Server] Opened '{cam_name}' index={resolved_id} ({label}), "
-                f"buffer=1, target size={size_desc}",
+                f"[Server] Camera index {camera_id} ({label}), buffer=1, target size={size_desc}",
                 flush=True,
             )
             return cap
         cap.release()
-    print(f"[Server] ERROR: Could not open camera '{cam_name}' (index={resolved_id})", flush=True)
     return None
 
 
@@ -233,12 +227,11 @@ class GestureServer:
         debug=False,
         capture_width=None,
         capture_height=None,
-        prefer_splitcam=False,
+        gaze_camera=None,
     ):
         self.host = host
         self.port = port
         self.camera_id = camera_id
-        self.prefer_splitcam = prefer_splitcam
         self.capture_width = (
             _DEFAULT_CAPTURE_WIDTH if capture_width is None else capture_width
         )
@@ -310,61 +303,60 @@ class GestureServer:
                 self.yolo_model = YOLO(weights)
                 print(f"[Server] YOLO loaded: {weights} (infer every {YOLO_INFERENCE_EVERY_FRAMES} frames)", flush=True)
             else:
-                # Ultralytics downloads yolo11n on first use
                 self.yolo_model = YOLO("yolo11n.pt")
-                print(f"[Server] YOLO using yolo11n.pt (infer every {YOLO_INFERENCE_EVERY_FRAMES} frames). Add yolo26m.pt to project root for larger model.", flush=True)
+                print(f"[Server] YOLO using yolo11n.pt (infer every {YOLO_INFERENCE_EVERY_FRAMES} frames).", flush=True)
         except Exception as e:
             print(f"[Server] YOLO disabled: {e}", flush=True)
             exe = getattr(sys, "executable", "python")
-            print(f"[Server] This server is using Python: {exe}", flush=True)
-            print(
-                "[Server] Run: "
-                + f'"{exe}" -m pip install ultralytics',
-                flush=True,
-            )
+            print(f'[Server] Run: "{exe}" -m pip install ultralytics', flush=True)
+
+        # SORT tracker — gives stable track IDs across YOLO inference ticks.
+        self._sort_tracker = None
+        try:
+            from sort_tracker import SORTTracker
+            self._sort_tracker = SORTTracker(max_age=30, min_hits=3, iou_threshold=0.3)
+            print("[Server] SORT tracker loaded.", flush=True)
+        except Exception as e:
+            print(f"[Server] SORT tracker disabled (boxes won't have IDs): {e}", flush=True)
 
         # Pixel-space boxes redrawn on preview every frame; updated only when YOLO runs.
-        self._yolo_overlay_boxes = []
+        self._yolo_overlay_boxes = []   # (x1, y1, x2, y2, class_name, conf, track_id)
 
-        # Gaze Tracking — MediaPipe FaceMesh + Kalman filter (from GazeTracking/)
-        _gaze_dir = os.path.join(_PROJECT_ROOT, "GazeTracking")
-        if _gaze_dir not in sys.path:
-            sys.path.insert(0, _gaze_dir)
+        # Gaze Tracking — MediaPipe FaceMesh + Kalman filter
+        # Uses gaze_camera if specified (e.g. SplitCam); otherwise shares the gesture frame.
+        self._gaze_tracker = None
+        self._gaze_filter  = None
+        self._gaze_cap     = None
+        self.gaze_enabled  = False
         try:
-            from gaze_tracker import create_tracker as _create_gaze_tracker  # type: ignore[import]
-            from gaze_filter import create_gaze_filter as _create_gaze_filter  # type: ignore[import]
+            from gaze_tracker import create_tracker as _create_gaze_tracker
+            from gaze_filter import create_gaze_filter as _create_gaze_filter
 
-            # If SplitCam is preferred, gaze uses the virtual cam independently;
-            # otherwise we inject the same frame already captured for hand tracking.
-            if prefer_splitcam:
-                from camera_utils import find_splitcam, enumerate_cameras
-                _cams = enumerate_cameras()
-                _sc = find_splitcam(_cams)
-                _gaze_cam_idx = _sc["index"] if (_sc and _sc["index"] != camera_id) else camera_id
-            else:
-                _gaze_cam_idx = camera_id
-
+            _gaze_cam_idx = gaze_camera if gaze_camera is not None else camera_id
             self._gaze_tracker = _create_gaze_tracker(camera=_gaze_cam_idx, api="legacy")
             self._gaze_filter  = _create_gaze_filter("kalman", strength=0.5)
 
-            # Open a dedicated VideoCapture only when the gaze cam differs from
-            # the gesture cam (avoids fighting over the same device handle).
-            if prefer_splitcam and _gaze_cam_idx != camera_id:
+            # Open a dedicated capture only when gaze uses a different camera index.
+            if gaze_camera is not None and gaze_camera != camera_id:
                 _backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
-                self._gaze_cap = cv2.VideoCapture(_gaze_cam_idx, _backend)
-                print(f"[Server] Gaze Tracking on dedicated camera index {_gaze_cam_idx} (SplitCam).", flush=True)
+                self._gaze_cap = cv2.VideoCapture(gaze_camera, _backend)
+                print(f"[Server] Gaze using dedicated camera {gaze_camera} (e.g. SplitCam).", flush=True)
             else:
-                self._gaze_cap = None  # reuse the gesture frame
-                print("[Server] Gaze Tracking sharing the gesture camera frame.", flush=True)
+                self._gaze_cap = None   # reuse gesture frame — no extra device opened
+                print("[Server] Gaze sharing the gesture camera frame.", flush=True)
 
             self.gaze_enabled = True
             print("[Server] GazeTracker (MediaPipe FaceMesh + Kalman) loaded.", flush=True)
         except Exception as e:
             print(f"[Server] Gaze Tracking disabled: {e}", flush=True)
-            self._gaze_tracker = None
-            self._gaze_filter  = None
-            self._gaze_cap     = None
-            self.gaze_enabled  = False
+
+        # Gaze Evaluator — generates heatmap / scanpath / JSON log / markdown report on exit
+        self._gaze_evaluator = None
+        if self.gaze_enabled and GazeEvaluator is not None:
+            _ts = time.strftime("%Y%m%d_%H%M%S")
+            _report_dir = os.path.join(_PROJECT_ROOT, "gaze_reports", f"session_{_ts}")
+            self._gaze_evaluator = GazeEvaluator(output_dir=_report_dir)
+            print(f"[Server] Gaze evaluation active → {_report_dir}", flush=True)
 
     def _skeleton_from_hands(self, hand_landmarks, handedness=None):
         """Build cursor skeleton from hand index tips (C# expects right_wrist/left_wrist)."""
@@ -442,13 +434,10 @@ class GestureServer:
         print(f"[Server] Listening on {self.host}:{self.port}", flush=True)
 
         cap = open_gesture_camera(
-            self.camera_id,
-            self.capture_width,
-            self.capture_height,
-            prefer_splitcam=self.prefer_splitcam,
+            self.camera_id, self.capture_width, self.capture_height
         )
         if cap is None:
-            print("[Server] ERROR: Could not open any camera", flush=True)
+            print("[Server] ERROR: Could not open camera", flush=True)
             self.running = False
             return
 
@@ -573,26 +562,58 @@ class GestureServer:
                 if self.yolo_model and frame_count % YOLO_INFERENCE_EVERY_FRAMES == 0:
                     try:
                         results = self.yolo_model(frame, verbose=False)
-                        overlay = []
+                        raw_dets = []   # [x1, y1, x2, y2, conf] for SORT
+                        det_meta = []   # (class_name) matching raw_dets order
                         if results and len(results) > 0:
                             boxes = results[0].boxes
                             if boxes is not None and len(boxes) > 0:
                                 for box in boxes:
                                     xyxy = box.xyxy[0].cpu().numpy()
                                     conf = float(box.conf[0])
-                                    cls = int(box.cls[0])
+                                    cls  = int(box.cls[0])
                                     class_name = results[0].names[cls]
-                                    x1, y1, x2, y2 = map(int, xyxy)
-                                    msg["yolo"].append({"class": class_name, "x": (x1+x2)/2/w, "y": (y1+y2)/2/h, "w": (x2-x1)/w, "h": (y2-y1)/h, "conf": conf})
-                                    overlay.append((x1, y1, x2, y2, class_name, conf))
+                                    raw_dets.append([xyxy[0], xyxy[1], xyxy[2], xyxy[3], conf])
+                                    det_meta.append(class_name)
+
+                        # Run SORT to assign stable track IDs
+                        overlay = []
+                        if self._sort_tracker and raw_dets:
+                            import numpy as _np
+                            tracked = self._sort_tracker.update(_np.array(raw_dets))
+                            # tracked rows: [x1, y1, x2, y2, track_id]
+                            for track in tracked:
+                                tx1, ty1, tx2, ty2, tid = int(track[0]), int(track[1]), int(track[2]), int(track[3]), int(track[4])
+                                # Match back to a class name by IoU with raw_dets
+                                best_cls, best_conf = "object", 0.0
+                                for i, rd in enumerate(raw_dets):
+                                    if abs(rd[0] - tx1) < 10 and abs(rd[1] - ty1) < 10:
+                                        best_cls, best_conf = det_meta[i], rd[4]
+                                        break
+                                msg["yolo"].append({"track_id": tid, "class": best_cls,
+                                                    "x": (tx1+tx2)/2/w, "y": (ty1+ty2)/2/h,
+                                                    "w": (tx2-tx1)/w,   "h": (ty2-ty1)/h,
+                                                    "conf": round(best_conf, 3)})
+                                overlay.append((tx1, ty1, tx2, ty2, best_cls, best_conf, tid))
+                        else:
+                            # SORT unavailable — fall back to raw detections (no IDs)
+                            for i, rd in enumerate(raw_dets):
+                                x1, y1, x2, y2 = int(rd[0]), int(rd[1]), int(rd[2]), int(rd[3])
+                                conf = rd[4]
+                                msg["yolo"].append({"track_id": -1, "class": det_meta[i],
+                                                    "x": (x1+x2)/2/w, "y": (y1+y2)/2/h,
+                                                    "w": (x2-x1)/w,   "h": (y2-y1)/h,
+                                                    "conf": round(conf, 3)})
+                                overlay.append((x1, y1, x2, y2, det_meta[i], conf, -1))
+
                         self._yolo_overlay_boxes = overlay
                     except Exception as e:
                         if self._debug:
                             print(f"[Server] YOLO inference error: {e}", flush=True)
 
-                for x1, y1, x2, y2, cname, yconf in self._yolo_overlay_boxes:
+                for x1, y1, x2, y2, cname, yconf, tid in self._yolo_overlay_boxes:
                     cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 165, 255), 2)
-                    lab = f"{cname} {yconf:.2f}"
+                    id_str = f"#{tid} " if tid >= 0 else ""
+                    lab = f"{id_str}{cname} {yconf:.2f}"
                     cv2.putText(
                         display_frame,
                         lab,
@@ -604,10 +625,12 @@ class GestureServer:
                         cv2.LINE_AA,
                     )
 
-                # Gaze tracking (MediaPipe FaceMesh + Kalman) every 2 frames
+                # Gaze tracking — MediaPipe FaceMesh + Kalman filter, every 2 frames
                 if self.gaze_enabled and frame_count % 2 == 0:
+                    if self._gaze_evaluator:
+                        self._gaze_evaluator.tick()
                     try:
-                        # Use dedicated SplitCam frame if available, else share gesture frame
+                        # Use dedicated SplitCam frame when available, else reuse gesture frame
                         if self._gaze_cap is not None and self._gaze_cap.isOpened():
                             ret_g, gaze_frame = self._gaze_cap.read()
                             if not ret_g or gaze_frame is None:
@@ -628,6 +651,12 @@ class GestureServer:
                             cv2.circle(display_frame, (gx, gy), 15, (255, 255, 0), 2)
                             cv2.putText(display_frame, "Gaze", (gx - 20, gy - 20),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                            # Record for evaluation report
+                            if self._gaze_evaluator:
+                                self._gaze_evaluator.record(gaze_result)
+                        else:
+                            if self._gaze_evaluator:
+                                self._gaze_evaluator.miss()
                     except Exception as e:
                         if self._debug:
                             print(f"[Server] Gaze error: {e}", flush=True)
@@ -653,6 +682,8 @@ class GestureServer:
             cap.release()
             if self._gaze_cap is not None:
                 self._gaze_cap.release()
+            if self._gaze_evaluator is not None:
+                self._gaze_evaluator.save_report()
             cv2.destroyAllWindows()
             server_socket.close()
             self.hand_landmarker.close()
@@ -664,46 +695,28 @@ class GestureServer:
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Gesture Server – MediaPipe Hands + DollarPy recognizer."
+        description="Gesture Server — MediaPipe Hands + Gaze (FaceMesh) + YOLO + Emotion."
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument(
-        "--camera", type=int, default=0,
-        help="Camera index to use (default: 0).",
-    )
-    parser.add_argument(
-        "--splitcam", action="store_true",
-        help="Prefer SplitCam (or any virtual camera) over the default webcam.",
-    )
-    parser.add_argument(
-        "--list-cameras", action="store_true",
-        help="List all detected cameras and exit.",
-    )
+    parser.add_argument("--camera", type=int, default=0,
+                        help="Camera index for hand tracking (default: 0).")
+    parser.add_argument("--gaze-camera", type=int, default=None,
+                        help="Separate camera index for gaze tracking (e.g. SplitCam). "
+                             "Omit to share the --camera frame.")
     parser.add_argument("--templates", default=None, help="Path to gesture_templates.json")
-    parser.add_argument(
-        "--body", action="store_true",
-        help="Use holistic_landmarker (pose+hands) instead of hand only.",
-    )
+    parser.add_argument("--body", action="store_true",
+                        help="Use holistic_landmarker (pose+hands) instead of hand only.")
     parser.add_argument("--debug", action="store_true", help="Print recognition attempts.")
     parser.add_argument(
-        "--width",
-        type=int,
-        default=_DEFAULT_CAPTURE_WIDTH,
-        help="Capture width (0 = driver default; lower = faster). Default %(default)s.",
+        "--width", type=int, default=_DEFAULT_CAPTURE_WIDTH,
+        help="Capture width (0 = driver default). Default %(default)s.",
     )
     parser.add_argument(
-        "--height",
-        type=int,
-        default=_DEFAULT_CAPTURE_HEIGHT,
+        "--height", type=int, default=_DEFAULT_CAPTURE_HEIGHT,
         help="Capture height (0 = driver default). Default %(default)s.",
     )
     args = parser.parse_args()
-
-    if args.list_cameras:
-        print_camera_list()
-        return
-
     server = GestureServer(
         host=args.host,
         port=args.port,
@@ -713,7 +726,7 @@ def main():
         debug=args.debug,
         capture_width=args.width,
         capture_height=args.height,
-        prefer_splitcam=args.splitcam,
+        gaze_camera=args.gaze_camera,
     )
     try:
         server.run()
