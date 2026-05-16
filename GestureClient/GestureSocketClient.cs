@@ -133,6 +133,7 @@ namespace GestureClient
                     var emotion = ParseEmotion(msg);
                     var yolo = ParseYolo(msg);
                     var gaze = ParseGaze(msg);
+                    string proximity = msg.ContainsKey("proximity") ? msg["proximity"]?.ToString() : "ok";
 
                     lock (listenerLock)
                     {
@@ -150,6 +151,7 @@ namespace GestureClient
                                     l.OnYoloDetection(yolo);
                                 if (gaze != null)
                                     l.OnGazeUpdate(gaze[0], gaze[1]);
+                                l.OnProximityUpdate(proximity);
                             }
                             catch (Exception ex)
                             {

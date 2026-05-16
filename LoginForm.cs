@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Windows.Forms;
 using GestureClient;
+using HCI_Lab_codes.Models;
 using TUIO;
 using TuioDemoApp;
 
@@ -160,6 +161,17 @@ public class LoginForm : Form, TuioListener
                         IsTeacher = (result.Kind == FaceLogin.LoginKind.Teacher);
                         IdentifiedAgeYears = result.AgeYears;
                         IdentifiedPersonName = result.PersonDisplayName ?? "";
+
+                        var user = HCI_Lab_codes.Models.UserManager.GetByFaceId(result.ProfileKey);
+                        if (user == null) {
+                            user = HCI_Lab_codes.Models.UserManager.CreateUser(
+                                result.ProfileKey,
+                                IsTeacher ? "teacher" : "child",
+                                string.IsNullOrWhiteSpace(result.PersonDisplayName) ? null : result.PersonDisplayName);
+                        } else {
+                            IsTeacher = (user.Role == "teacher" || user.Role == "admin");
+                        }
+
                         FinishLogin(DialogResult.OK,
                             IsTeacher
                                 ? ("Welcome" + (

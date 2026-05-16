@@ -75,22 +75,19 @@ class GazeTracker:
         self._setup_detector()
     
     def _setup_detector(self):
-        if self.api == GazeAPI.NEW:
-            from mediapipe.tasks import python
-            from mediapipe.tasks.vision import FaceLandmarker, FaceLandmarkerOptions
-            
-            base_options = python.BaseOptions(model_asset_path=self.model_path)
-            options = FaceLandmarkerOptions(base_options=base_options, num_faces=1)
-            self.detector = FaceLandmarker.create_from_options(options)
-        else:
-            import mediapipe as mp
-            self.mp_face_mesh = mp.solutions.face_mesh
-            self.detector = self.mp_face_mesh.FaceMesh(
-                max_num_faces=1,
-                refine_landmarks=True,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5
-            )
+        # Always use the new Tasks API — mp.solutions was removed in MediaPipe 0.10+
+        from mediapipe.tasks.python import BaseOptions as _BaseOptions
+        from mediapipe.tasks.python import vision as _mp_vision
+
+        base_options = _BaseOptions(model_asset_path=self.model_path)
+        options = _mp_vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+            num_faces=1,
+        )
+        self.detector = _mp_vision.FaceLandmarker.create_from_options(options)
+        self._mp_vision = _mp_vision  # keep reference for estimate_gaze
     
     def start(self):
         if self.cap is None or not self.cap.isOpened():
@@ -119,43 +116,28 @@ class GazeTracker:
             for idx in indices
         ], dtype="double")
     
-    def _get_iris_landmarks(self, landmarks, api: GazeAPI):
-        if api == GazeAPI.LEGACY:
-            left_iris = landmarks[468]
-            right_iris = landmarks[473]
-            return (int(left_iris.x * 1280), int(left_iris.y * 720)), \
-                   (int(right_iris.x * 1280), int(right_iris.y * 720))
-        else:
-            left_iris = landmarks[468]
-            right_iris = landmarks[473]
-            return (int(left_iris.x * 1280), int(left_iris.y * 720)), \
-                   (int(right_iris.x * 1280), int(right_iris.y * 720))
+    def _get_iris_landmarks(self, landmarks, frame_w: int = 1280, frame_h: int = 720):
+        left_iris  = landmarks[468]
+        right_iris = landmarks[473]
+        return (int(left_iris.x  * frame_w), int(left_iris.y  * frame_h)), \
+               (int(right_iris.x * frame_w), int(right_iris.y * frame_h))
     
     def estimate_gaze(self, frame) -> GazeResult:
         h, w = frame.shape[:2]
         
-        if self.api == GazeAPI.NEW:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            import mediapipe as mp
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-            results = self.detector.detect(mp_image)
-            
-            if not results.face_landmarks:
-                return GazeResult(0.5, 0.5, 0, 0, 0, 0, 0, (0, 0), (0, 0), False)
-            
-            landmarks = results.face_landmarks[0]
-            image_points = self._get_image_points_new(landmarks, (h, w))
-        else:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.detector.process(rgb)
-            
-            if not results.multi_face_landmarks:
-                return GazeResult(0.5, 0.5, 0, 0, 0, 0, 0, (0, 0), (0, 0), False)
-            
-            landmarks = results.multi_face_landmarks[0]
-            image_points = self._get_image_points_legacy(landmarks, (h, w))
+        # Tasks API (works with MediaPipe 0.10+)
+        import mediapipe as mp
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        results = self.detector.detect(mp_image)
+
+        if not results.face_landmarks:
+            return GazeResult(0.5, 0.5, 0, 0, 0, 0, 0, (0, 0), (0, 0), False)
+
+        landmarks = results.face_landmarks[0]
+        image_points = self._get_image_points_new(landmarks, (h, w))
         
-        left_pupil, right_pupil = self._get_iris_landmarks(landmarks, self.api)
+        left_pupil, right_pupil = self._get_iris_landmarks(landmarks, frame_w=w, frame_h=h)
         
         focal_length = w
         center = (w / 2, h / 2)
@@ -187,7 +169,7 @@ class GazeTracker:
             for i in range(len(image_points))
         ], dtype="double")
         
-        transformation, _ = cv2.estimateAffine3D(
+        _, transformation, _ = cv2.estimateAffine3D(
             np.array([(p[0], p[1], 0) for p in image_points], dtype="double"),
             self._3d_model_points
         )
