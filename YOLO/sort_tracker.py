@@ -68,7 +68,7 @@ class SORTTracker:
         inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
         
         box1_area = (x1_max - x1_min) * (y1_max - y1_min)
-        box2_area = (x2_max - x2_min) * (y2_max - y2_max)
+        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
         
         union_area = box1_area + box2_area - inter_area
         
@@ -134,7 +134,9 @@ class SORTTracker:
             return np.array([])
         
         matched_dets, matched_trks, unmatched_dets = self._associate_detections_with_tracks(detections)
-        
+        matched_trk_set = set(int(t) for t in matched_trks)
+        unmatched_tracks = [i for i in range(len(self.tracks)) if i not in matched_trk_set]
+
         for d_idx, t_idx in zip(matched_dets, matched_trks):
             det = detections[d_idx]
             track = self.tracks[t_idx]

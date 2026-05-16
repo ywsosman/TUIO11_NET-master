@@ -10,6 +10,7 @@ using System.Text;
 using System.Speech.Synthesis;
 using System.Threading;
 using System.Windows.Forms;
+using HCI_Lab_codes.Models;
 using TUIO;
 using GestureClient;
 
@@ -40,12 +41,17 @@ namespace TuioDemoApp
     private bool radialGestureMode;
     private bool radialCursorFollowsGesture;
     private float gestureWristX = -1f, gestureWristY = -1f;
+    private string proximityWarning = "ok";
 
     // ── Emotion / difficulty state ────────────────────────────────────────────
     private string currentDifficultyHint = "normal";   // "easier", "harder", "normal"
     private string currentEmotionLabel   = "";
     private float currentEmotionConf     = 0.0f;
     private DateTime emotionLastUpdate   = DateTime.MinValue;
+
+    // ── Adaptive hints from prior sessions (gaze_adapter / emotion_adapter) ──
+    private AdaptiveHints adaptiveHints = new AdaptiveHints();
+    private DateTime      adaptiveHintsLoadedAt = DateTime.MinValue;
 
     private PointF currentGazePoint = new PointF(-1, -1);
     private readonly object gazeHistoryLock = new object();
@@ -224,6 +230,40 @@ namespace TuioDemoApp
         InitializeRadialMenu();
         InitializeBluetoothPairing();
 
+        // ── Apply adaptive hints derived from prior gaze + emotion sessions ──
+        // Written by python/gaze_adapter.py + python/emotion_adapter.py at the
+        // end of every session; consumed here on the next launch.
+        adaptiveHints = AdaptiveHints.Load(this.userProfileKey);
+        if (adaptiveHints.WasLoaded)
+        {
+            adaptiveHintsLoadedAt = DateTime.Now;
+            Console.WriteLine("[TuioDemo] " + adaptiveHints.ShortSummary());
+            Console.WriteLine("            source: " + adaptiveHints.SourcePath);
+
+            // Bias the starting difficulty hint based on past emotion profile.
+            string biasHint = adaptiveHints.ResolvedDifficultyHint();
+            if (biasHint != "normal") ApplyDifficultyHint(biasHint);
+
+            // If past sessions show this child often gets confused, give an
+            // audio cue for the first target as soon as the game starts.
+            if (adaptiveHints.StartWithAudioHint && speech != null && CurrentLevel != null)
+            {
+                var firstTarget = CurrentLevel.Targets.FirstOrDefault();
+                if (firstTarget != null && !string.IsNullOrEmpty(firstTarget.ObjectName))
+                {
+                    try
+                    {
+                        speech.SpeakAsyncCancelAll();
+                        speech.SpeakAsync("Let's find the " + firstTarget.ObjectName);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("[TuioDemo] Audio hint failed: " + ex.Message);
+                    }
+                }
+            }
+        }
+
         // ── TUIO markers (always active – handles object placement) ────────────
         client = new TuioClient(port);
         client.addTuioListener(this);
@@ -337,6 +377,12 @@ namespace TuioDemoApp
                 evalEmotionCounts[label] = evalEmotionCounts.TryGetValue(label, out n) ? n + 1 : 1;
             }
         }
+    }
+
+    public void OnProximityUpdate(string status)
+    {
+        proximityWarning = status;
+        // Invalidate on UI thread if needed (the timer already runs at 60 FPS though)
     }
 
     public void OnYoloDetection(IList<YoloObject> detections)
@@ -601,6 +647,14 @@ namespace TuioDemoApp
     {
         hint = "";
         if (CurrentLevel == null) return false;
+
+        // Wait at least `auto_hint_threshold_sec` after the level starts before
+        // showing any contextual hint — gives the student a chance to try first.
+        // Defaults to 4s if no adaptive_hints file has been written yet.
+        int hintDelaySec = (adaptiveHints != null && adaptiveHints.AutoHintThresholdSec > 0)
+            ? adaptiveHints.AutoHintThresholdSec : 4;
+        if (levelStopwatch.IsRunning &&
+            levelStopwatch.Elapsed.TotalSeconds < hintDelaySec) return false;
 
         double emotionAgeSec = (DateTime.Now - emotionLastUpdate).TotalSeconds;
         if (emotionAgeSec > 14.0 || string.IsNullOrEmpty(currentEmotionLabel)) return false;
@@ -1057,6 +1111,19 @@ namespace TuioDemoApp
 
     public void addTuioObject(TuioObject o)
     {
+        // Difficulty token intercept (11=Easy, 12=Medium, 13=Hard)
+        if (o.SymbolID >= 11 && o.SymbolID <= 13)
+        {
+            string newDiff = o.SymbolID == 11 ? "easy" : (o.SymbolID == 12 ? "medium" : "hard");
+            HCI_Lab_codes.Models.UserManager.UpdateDifficulty(userProfileKey, newDiff);
+            
+            // Provide feedback via KidPopup
+            BeginInvoke((MethodInvoker)delegate {
+                KidPopup.Show(this.client, "Difficulty Changed", $"Difficulty set to {newDiff.ToUpper()}");
+            });
+            return;
+        }
+
         lock (objectList)
         {
             objectList[o.SessionID] = o;
@@ -1227,15 +1294,20 @@ namespace TuioDemoApp
 
     private void DrawPlayfulBackground(Graphics g, int w, int h)
     {
+        bool isNight = DateTime.Now.Hour >= 18 || DateTime.Now.Hour < 6;
+        Color skyColor1 = isNight ? Color.FromArgb(10, 20, 50) : Color.FromArgb(135, 206, 235);
+        Color skyColor2 = isNight ? Color.FromArgb(40, 50, 90) : Color.FromArgb(224, 255, 255);
+
         // Sky Gradient
         using (System.Drawing.Drawing2D.LinearGradientBrush skyBrush = new System.Drawing.Drawing2D.LinearGradientBrush(
-            new Rectangle(0, 0, w, h), Color.FromArgb(135, 206, 235), Color.FromArgb(224, 255, 255), 90f))
+            new Rectangle(0, 0, w, h), skyColor1, skyColor2, 90f))
         {
             g.FillRectangle(skyBrush, 0, 0, w, h);
         }
 
-        // Fluffy Clouds
-        using (SolidBrush cloudBrush = new SolidBrush(Color.FromArgb(200, 255, 255, 255)))
+        // Fluffy Clouds (darker if night)
+        int cloudAlpha = isNight ? 100 : 200;
+        using (SolidBrush cloudBrush = new SolidBrush(Color.FromArgb(cloudAlpha, 255, 255, 255)))
         {
             g.FillEllipse(cloudBrush, w * 0.1f, h * 0.1f, w * 0.15f, h * 0.1f);
             g.FillEllipse(cloudBrush, w * 0.15f, h * 0.08f, w * 0.15f, h * 0.12f);
@@ -1246,12 +1318,14 @@ namespace TuioDemoApp
             g.FillEllipse(cloudBrush, w * 0.82f, h * 0.2f, w * 0.12f, h * 0.09f);
         }
 
-        // Rolling Hills
-        using (SolidBrush hillBrush = new SolidBrush(Color.FromArgb(144, 238, 144))) // LightGreen
+        // Rolling Hills (darker if night)
+        Color hill1 = isNight ? Color.FromArgb(30, 80, 30) : Color.FromArgb(144, 238, 144);
+        Color hill2 = isNight ? Color.FromArgb(40, 90, 40) : Color.FromArgb(152, 251, 152);
+        using (SolidBrush hillBrush = new SolidBrush(hill1))
         {
             g.FillEllipse(hillBrush, -w * 0.2f, h * 0.6f, w * 0.8f, h * 0.6f);
         }
-        using (SolidBrush hillBrush2 = new SolidBrush(Color.FromArgb(152, 251, 152))) // PaleGreen
+        using (SolidBrush hillBrush2 = new SolidBrush(hill2))
         {
             g.FillEllipse(hillBrush2, w * 0.4f, h * 0.55f, w * 0.8f, h * 0.6f);
         }
@@ -1262,8 +1336,8 @@ namespace TuioDemoApp
         Graphics g = pevent.Graphics;
         g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
-        // Clear whole screen with sky color first so edges don't smear during slide
-        g.Clear(Color.FromArgb(135, 206, 235));
+        bool isNight = DateTime.Now.Hour >= 18 || DateTime.Now.Hour < 6;
+        g.Clear(isNight ? Color.FromArgb(10, 20, 50) : Color.FromArgb(135, 206, 235));
 
         if (levelTransitionOffset > 0.5f)
             levelTransitionOffset += (0 - levelTransitionOffset) * 0.1f;
@@ -2536,6 +2610,53 @@ namespace TuioDemoApp
             g.DrawString(line3, midFont, Brushes.DimGray, 30, 77);
         }
 
+        if (proximityWarning == "too_close")
+        {
+            using (var alertFont = new Font("Comic Sans MS", 24F, FontStyle.Bold))
+            {
+                string warn = "You are too close to the screen! Please step back.";
+                SizeF sz = g.MeasureString(warn, alertFont);
+                g.FillRectangle(new SolidBrush(Color.FromArgb(180, 255, 0, 0)), width / 2 - sz.Width / 2 - 20, height / 2 - sz.Height / 2 - 20, sz.Width + 40, sz.Height + 40);
+                g.DrawString(warn, alertFont, Brushes.White, width / 2 - sz.Width / 2, height / 2 - sz.Height / 2);
+            }
+        }
+        else if (proximityWarning == "too_far")
+        {
+            using (var alertFont = new Font("Comic Sans MS", 24F, FontStyle.Bold))
+            {
+                string warn = "You are too far! Please step closer.";
+                SizeF sz = g.MeasureString(warn, alertFont);
+                g.FillRectangle(new SolidBrush(Color.FromArgb(180, 255, 165, 0)), width / 2 - sz.Width / 2 - 20, height / 2 - sz.Height / 2 - 20, sz.Width + 40, sz.Height + 40);
+                g.DrawString(warn, alertFont, Brushes.White, width / 2 - sz.Width / 2, height / 2 - sz.Height / 2);
+            }
+        }
+
+        // ── Adaptive-hints indicator chip ─────────────────────────────────
+        // Shows a small chip in the top-right of the HUD so the teacher /
+        // student can SEE that prior-session data is shaping this run.
+        if (adaptiveHints != null && adaptiveHints.WasLoaded)
+        {
+            string chip = adaptiveHints.ShortSummary();
+            using (var chipFont = new Font("Comic Sans MS", 9.5F, FontStyle.Bold))
+            {
+                SizeF sz = g.MeasureString(chip, chipFont);
+                float chipW = sz.Width + 22;
+                float chipH = sz.Height + 8;
+                float chipX = width - chipW - 70;   // leave room for the close button
+                float chipY = 22;
+                RectangleF chipRect = new RectangleF(chipX, chipY, chipW, chipH);
+                using (System.Drawing.Drawing2D.GraphicsPath cp = GetRoundedRect(chipRect, 10))
+                using (SolidBrush chipBg = new SolidBrush(Color.FromArgb(230, 60, 120, 200)))
+                using (Pen chipBorder = new Pen(Color.FromArgb(255, 90, 160, 240), 2))
+                {
+                    g.FillPath(chipBg, cp);
+                    g.DrawPath(chipBorder, cp);
+                }
+                g.DrawString(chip, chipFont, Brushes.White, chipX + 10, chipY + 3);
+            }
+        }
+
+
         // Gaze Drawing
         if (currentGazePoint.X >= 0 && currentGazePoint.Y >= 0)
         {
@@ -2688,12 +2809,21 @@ namespace TuioDemoApp
         LoginForm login = new LoginForm(port);
         if (login.ShowDialog() == DialogResult.OK)
         {
-            var store = UserProgressStore.Load();
             string profileKey = string.IsNullOrWhiteSpace(login.UserProfileKey)
                 ? (login.IsTeacher ? "teacher:default" : "student:default")
                 : login.UserProfileKey.Trim();
-            store.EnsureProfile(profileKey, login.IsTeacher ? "teacher" : "student");
-            Application.Run(new TuioDemo(port, login.UseRadialGestureMode, login.IsTeacher, profileKey, store));
+
+            if (login.IsTeacher)
+            {
+                // Teachers see the zero-touch dashboard, not the game
+                Application.Run(new TeacherDashboardForm(port, profileKey));
+            }
+            else
+            {
+                var store = UserProgressStore.Load();
+                store.EnsureProfile(profileKey, "student");
+                Application.Run(new TuioDemo(port, login.UseRadialGestureMode, false, profileKey, store));
+            }
         }
     }
 }

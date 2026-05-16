@@ -1,0 +1,14 @@
+path: .
+train: images/train
+val: images/val
+test: images/test
+
+nc: 7
+names:
+  0: apple
+  1: banana
+  2: strawberry
+  3: watermelon
+  4: mango
+  5: orange
+  6: kiwi
