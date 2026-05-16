@@ -1,0 +1,16 @@
+{
+  "include": [
+    "python",
+    "GazeTracking",
+    "YOLO"
+  ],
+  "extraPaths": [
+    "python",
+    "GazeTracking",
+    "YOLO"
+  ],
+  "pythonVersion": "3.14",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "basic",
+  "reportMissingModuleSource": "none"
+}
