@@ -161,9 +161,11 @@ def open_gesture_camera(camera_id, width, height):
     Returns a configured cv2.VideoCapture or None.
     """
     if sys.platform == "win32":
+        # MSMF first: it supports Win11's multi-app camera sharing so the
+        # yolo_tuio_bridge can use the same physical camera concurrently.
         backends = [
-            (cv2.CAP_DSHOW, "DSHOW"),
             (cv2.CAP_MSMF, "MSMF"),
+            (cv2.CAP_DSHOW, "DSHOW"),
             (cv2.CAP_ANY, "ANY"),
         ]
     else:

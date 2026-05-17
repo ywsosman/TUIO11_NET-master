@@ -1,7 +1,7 @@
 task: detect
 mode: train
 model: yolo11n.pt
-data: D:\youssef\Fullstack Course\hci\TUIO11_NET-master\fruit_dataset\fruit_data.yaml
+data: D:\youssef\Fullstack Course\hci\TUIO11_NET-master\fruit_dataset\fruit_data.resolved.yaml
 epochs: 80
 time: null
 patience: 20

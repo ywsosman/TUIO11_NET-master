@@ -13,10 +13,24 @@ import shutil
 
 _SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_SCRIPT_DIR)
+_DATASET_DIR  = os.path.join(_PROJECT_ROOT, "fruit_dataset")
 
-DATA_YAML   = os.path.join(_PROJECT_ROOT, "fruit_dataset", "fruit_data.yaml")
-OUTPUT_NAME = "fruit_train"
-BEST_PT_DST = os.path.join(_PROJECT_ROOT, "fruit_best.pt")
+DATA_YAML     = os.path.join(_DATASET_DIR, "fruit_data.yaml")
+RESOLVED_YAML = os.path.join(_DATASET_DIR, "fruit_data.resolved.yaml")
+OUTPUT_NAME   = "fruit_train"
+BEST_PT_DST   = os.path.join(_PROJECT_ROOT, "fruit_best.pt")
+
+
+def _write_resolved_yaml():
+    """Rewrite the dataset YAML with an absolute `path:` so Ultralytics
+    doesn't resolve `path: .` against CWD instead of the YAML's directory."""
+    import yaml
+    with open(DATA_YAML, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f)
+    cfg["path"] = _DATASET_DIR.replace("\\", "/")
+    with open(RESOLVED_YAML, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    return RESOLVED_YAML
 
 
 def main():
@@ -39,9 +53,11 @@ def main():
     # Start from the nano model — fastest to fine-tune, good enough for 7 classes
     model = YOLO("yolo11n.pt")
 
-    # Must use absolute path so YOLO resolves images/ correctly
+    resolved = _write_resolved_yaml()
+    print(f"  Using   : {resolved}")
+
     results = model.train(
-        data=os.path.abspath(DATA_YAML),
+        data=resolved,
         epochs=80,
         imgsz=416,
         batch=4,

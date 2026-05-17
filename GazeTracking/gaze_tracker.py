@@ -177,27 +177,31 @@ class GazeTracker:
         if transformation is None:
             return GazeResult(0.5, 0.5, 0, 0, head_yaw, head_pitch, 0.5, left_pupil, right_pupil, True)
         
-        pupil_world_cord = transformation @ np.array([[left_pupil[0], left_pupil[1], 0, 1]]).T
-        
-        S = self.eye_ball_center_left + (pupil_world_cord - self.eye_ball_center_left) * 10
-        
-        (eye_pupil2D, _) = cv2.projectPoints(
-            (int(S[0]), int(S[1]), int(S[2])),
-            rotation_vector,
-            translation_vector,
-            camera_matrix,
-            dist_coeffs
-        )
-        
-        (head_pose, _) = cv2.projectPoints(
-            (int(pupil_world_cord[0]), int(pupil_world_cord[1]), 40),
-            rotation_vector,
-            translation_vector,
-            camera_matrix,
-            dist_coeffs
-        )
-        
-        gaze_2d = left_pupil + (eye_pupil2D[0][0] - left_pupil) - (head_pose[0][0] - left_pupil)
+        # Compute the gaze ray independently for each eye, then average the
+        # screen-space results. Using both eyes removes the left-side bias and
+        # halves the iris-detection noise when both eyes are visible.
+        def _eye_gaze_2d(pupil_px, eye_ball_center):
+            pupil_world = transformation @ np.array([[pupil_px[0], pupil_px[1], 0, 1]]).T
+            S_eye = eye_ball_center + (pupil_world - eye_ball_center) * 10
+            eye_pupil2D, _ = cv2.projectPoints(
+                (int(S_eye[0]), int(S_eye[1]), int(S_eye[2])),
+                rotation_vector,
+                translation_vector,
+                camera_matrix,
+                dist_coeffs,
+            )
+            head_pose_eye, _ = cv2.projectPoints(
+                (int(pupil_world[0]), int(pupil_world[1]), 40),
+                rotation_vector,
+                translation_vector,
+                camera_matrix,
+                dist_coeffs,
+            )
+            return pupil_px + (eye_pupil2D[0][0] - pupil_px) - (head_pose_eye[0][0] - pupil_px)
+
+        gaze_L = _eye_gaze_2d(left_pupil,  self.eye_ball_center_left)
+        gaze_R = _eye_gaze_2d(right_pupil, self.eye_ball_center_right)
+        gaze_2d = (np.asarray(gaze_L, dtype=float) + np.asarray(gaze_R, dtype=float)) / 2.0
         
         norm_x = np.clip(gaze_2d[0] / w, 0, 1)
         norm_y = np.clip(gaze_2d[1] / h, 0, 1)
