@@ -64,6 +64,15 @@ namespace TuioDemoApp
         private User       deleteArmedTarget = null;
         private const double DELETE_WINDOW_SECONDS = 5.0;
 
+        // ── Close-button dwell (mirrors TuioDemo) ────────────────────────────
+        // Hand/gaze cursor parks over the red X for CloseButtonGestureDwellMs
+        // to close the dashboard, no physical click needed.
+        private Button   closeDashboardButton;
+        private DateTime closeGestureHoverSince = DateTime.MinValue;
+        private bool     shuttingDown;
+        private const int CloseButtonGestureDwellMs = 900;
+        private const int CloseButtonGestureInflatePx = 22;
+
         // ── Layout constants ──────────────────────────────────────────────────
         private const int TILE_W   = 280;
         private const int TILE_H   = 180;
@@ -112,6 +121,27 @@ namespace TuioDemoApp
             try { gestureClient.Connect(); }
             catch { Console.WriteLine("[Dashboard] GestureServer not running — hand cursor disabled."); }
 
+            // Red X button in top-right — dwell-to-close (same as TuioDemo).
+            closeDashboardButton = new Button
+            {
+                Text = "X",
+                Font = new Font("Arial", 16F, FontStyle.Bold),
+                ForeColor = Color.White,
+                BackColor = Color.FromArgb(232, 60, 60),
+                FlatStyle = FlatStyle.Flat,
+                Size = new Size(48, 48),
+                TabStop = false,
+                Cursor = Cursors.Hand,
+                AccessibleDescription = "Close dashboard",
+                Margin = Padding.Empty,
+            };
+            closeDashboardButton.FlatAppearance.BorderSize = 0;
+            closeDashboardButton.Click += (s, e) => Close();
+            Controls.Add(closeDashboardButton);
+            closeDashboardButton.BringToFront();
+            LayoutCloseButton();
+            Resize += (s, e) => LayoutCloseButton();
+
             // Repaint at ~60 fps for smooth dwell arc and cursor movement
             var timer = new Timer { Interval = 16 };
             timer.Tick += (s, e) =>
@@ -126,6 +156,7 @@ namespace TuioDemoApp
                     else           { cursorX = -1;    cursorY = -1;    }
                 }
                 TickDeleteArmedTimeout();
+                TickCloseButtonGestureDwell();
                 Invalidate();
             };
             timer.Start();
@@ -151,6 +182,7 @@ namespace TuioDemoApp
             DrawFeedbackBanner(g);
             DrawDeleteArmedOverlay(g);
             DrawCursor(g);
+            DrawCloseDwellArc(g);
         }
 
         /// <summary>
@@ -659,8 +691,80 @@ namespace TuioDemoApp
         // ── Cleanup ───────────────────────────────────────────────────────────
         private void OnFormClosing(object sender, FormClosingEventArgs e)
         {
+            shuttingDown = true;
             try { tuioClient?.removeTuioListener(this); tuioClient?.disconnect(); } catch { }
             try { gestureClient?.RemoveListener(this); gestureClient?.Disconnect(); } catch { }
+        }
+
+        // ── Close-button dwell helpers (mirrors TuioDemo) ─────────────────────
+        private void LayoutCloseButton()
+        {
+            if (closeDashboardButton == null || closeDashboardButton.IsDisposed) return;
+            const int pad = 10;
+            int x = Math.Max(pad, ClientSize.Width - closeDashboardButton.Width - pad);
+            closeDashboardButton.Location = new Point(x, pad);
+            closeDashboardButton.BringToFront();
+        }
+
+        private void TickCloseButtonGestureDwell()
+        {
+            if (shuttingDown) return;
+            if (closeDashboardButton == null || closeDashboardButton.IsDisposed || !closeDashboardButton.Visible)
+                return;
+
+            // No active cursor (no hand, no gaze) → reset.
+            if (cursorX < 0 || cursorY < 0)
+            {
+                if (closeGestureHoverSince != DateTime.MinValue) Invalidate();
+                closeGestureHoverSince = DateTime.MinValue;
+                return;
+            }
+
+            Rectangle closeHit = closeDashboardButton.Bounds;
+            closeHit.Inflate(CloseButtonGestureInflatePx, CloseButtonGestureInflatePx);
+
+            if (!closeHit.Contains(cursorX, cursorY))
+            {
+                if (closeGestureHoverSince != DateTime.MinValue) Invalidate();
+                closeGestureHoverSince = DateTime.MinValue;
+                return;
+            }
+
+            DateTime now = DateTime.Now;
+            if (closeGestureHoverSince == DateTime.MinValue)
+            {
+                closeGestureHoverSince = now;
+                Invalidate();
+                return;
+            }
+
+            if ((now - closeGestureHoverSince).TotalMilliseconds >= CloseButtonGestureDwellMs)
+            {
+                closeGestureHoverSince = DateTime.MinValue;
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    if (!shuttingDown) Close();
+                });
+            }
+        }
+
+        private void DrawCloseDwellArc(Graphics g)
+        {
+            if (closeDashboardButton == null || closeDashboardButton.IsDisposed) return;
+            if (closeGestureHoverSince == DateTime.MinValue) return;
+
+            Rectangle wb = closeDashboardButton.Bounds;
+            wb.Inflate(12, 12);
+            double p = (DateTime.Now - closeGestureHoverSince).TotalMilliseconds / (double)CloseButtonGestureDwellMs;
+            p = Math.Min(1.0, Math.Max(0.0, p));
+
+            float sweep = (float)(360.0 * p);
+            using (var arcPen = new Pen(Color.FromArgb(255, 40, 200, 80), 4))
+            {
+                arcPen.StartCap = LineCap.Round;
+                arcPen.EndCap   = LineCap.Round;
+                g.DrawArc(arcPen, wb, -90f, sweep);
+            }
         }
 
         // ── Helper ────────────────────────────────────────────────────────────

@@ -356,6 +356,27 @@ namespace TuioDemoApp
             }
             return;
         }
+        if (g == "tap")
+        {
+            // Laser dwell — activate the radial item currently under the cursor.
+            if (radialMenuOpen)
+            {
+                BeginInvoke((MethodInvoker)(() =>
+                {
+                    int index = GetRadialSectorIndex(radialCursorPoint);
+                    if (index >= 0)
+                    {
+                        radialHoveredIndex = index;
+                        radialHoverSince = DateTime.Now;
+                        radialLastActionAt = DateTime.Now;
+                        radialSelectionLocked = true;
+                        ActivateRadialSelection(index);
+                        Invalidate();
+                    }
+                }));
+            }
+            return;
+        }
         if (IsHandleCreated && !IsDisposed)
             BeginInvoke((MethodInvoker)(() => Invalidate()));
     }
@@ -683,6 +704,9 @@ namespace TuioDemoApp
             BoardImageName = "level 1.png"
         };
 
+        // Path-1 setup: bridge falls back to base yolo11n.pt (COCO), which only
+        // ships apple/banana/orange among our 7 classes. Levels are restricted
+        // to those three so every required slot is one the detector can fire.
         level1.Targets.Add(new TargetSlot { SymbolId = 0, ObjectName = "Apple", XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
         level1.Targets.Add(new TargetSlot { SymbolId = 1, ObjectName = "Banana", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
 
@@ -691,15 +715,15 @@ namespace TuioDemoApp
             Name = "Level 2",
             BoardImageName = "level2.png"
         };
-        level2.Targets.Add(new TargetSlot { SymbolId = 2, ObjectName = "Strawberry", XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
-        level2.Targets.Add(new TargetSlot { SymbolId = 3, ObjectName = "Watermelon", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.15f, HeightNormalized = 0.21f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 0, ObjectName = "Apple",  XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
+        level2.Targets.Add(new TargetSlot { SymbolId = 5, ObjectName = "Orange", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
 
         var level3 = new LevelDefinition
         {
             Name = "Level 3",
             BoardImageName = "level2.png"
         };
-        level3.Targets.Add(new TargetSlot { SymbolId = 4, ObjectName = "Mango", XNormalized = 0.38f, YNormalized = 0.45f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level3.Targets.Add(new TargetSlot { SymbolId = 1, ObjectName = "Banana", XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
         level3.Targets.Add(new TargetSlot { SymbolId = 5, ObjectName = "Orange", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
 
         var level4 = new LevelDefinition
@@ -707,8 +731,9 @@ namespace TuioDemoApp
             Name = "Level 4",
             BoardImageName = "level2.png"
         };
-        level4.Targets.Add(new TargetSlot { SymbolId = 6, ObjectName = "Kiwi", XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
-        level4.Targets.Add(new TargetSlot { SymbolId = 2, ObjectName = "Strawberry", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.14f, HeightNormalized = 0.23f });
+        level4.Targets.Add(new TargetSlot { SymbolId = 0, ObjectName = "Apple",  XNormalized = 0.30f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
+        level4.Targets.Add(new TargetSlot { SymbolId = 1, ObjectName = "Banana", XNormalized = 0.50f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
+        level4.Targets.Add(new TargetSlot { SymbolId = 5, ObjectName = "Orange", XNormalized = 0.70f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.22f });
 
         levels.Add(level1);
         levels.Add(level2);
