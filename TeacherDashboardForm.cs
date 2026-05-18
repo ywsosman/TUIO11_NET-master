@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.IO;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using GestureClient;
 using HCI_Lab_codes.Models;
@@ -72,6 +75,21 @@ namespace TuioDemoApp
         private bool     shuttingDown;
         private const int CloseButtonGestureDwellMs = 900;
         private const int CloseButtonGestureInflatePx = 22;
+
+        // ── Add-Student tile (the missing C in CRUD) ─────────────────────────
+        // Mouse-and-keyboard-free Create flow: an extra "+" tile lives at the
+        // end of the student grid. Dwelling on it launches python/enroll_face.py,
+        // which uses the webcam to capture a new face → people/ + roles.tsv,
+        // then we reload UserManager and the new student appears in the grid.
+        private Rectangle addStudentTileRect = Rectangle.Empty;
+        private bool      addStudentHover;
+        private DateTime  addStudentDwellStart = DateTime.MinValue;
+        private bool      enrollmentInProgress;
+        private string    enrollmentStatusMessage = "";
+        // After an enrollment ends, require the cursor to leave the "+" tile
+        // at least once before another dwell can re-arm. Otherwise a teacher
+        // who didn't move their hand would instantly retrigger the helper.
+        private bool      addStudentDwellArmed = true;
 
         // ── Layout constants ──────────────────────────────────────────────────
         private const int TILE_W   = 280;
@@ -306,6 +324,99 @@ namespace TuioDemoApp
                 dwellStartTime   = newHoveredId != null ? DateTime.Now : DateTime.MinValue;
             }
             hoveredStudent = newHoveredUser;
+
+            // ── "+" Add-Student tile (slotted in after the last child tile) ──
+            DrawAddStudentTile(g, childIndex);
+        }
+
+        /// <summary>
+        /// Renders the dashed "+" tile that creates a new student via the
+        /// enroll_face.py helper. Position mirrors the next free grid slot so
+        /// it visually feels like an empty card waiting to be filled.
+        /// </summary>
+        private void DrawAddStudentTile(Graphics g, int nextChildIndex)
+        {
+            int col = nextChildIndex % 2;
+            int row = nextChildIndex / 2;
+            int x   = TILE_X0 + col * (TILE_W + TILE_GAP);
+            int y   = TILE_Y0 + row * (TILE_H + TILE_GAP);
+            addStudentTileRect = new Rectangle(x, y, TILE_W, TILE_H);
+
+            bool isHovered = !enrollmentInProgress &&
+                             cursorX >= x && cursorX <= x + TILE_W &&
+                             cursorY >= y && cursorY <= y + TILE_H;
+
+            // Track dwell on this tile separately from the student tiles so
+            // hovering it doesn't mess with currentHoveredId/dwellStartTime.
+            if (isHovered && addStudentDwellArmed)
+            {
+                if (!addStudentHover)
+                {
+                    addStudentHover = true;
+                    addStudentDwellStart = DateTime.Now;
+                }
+            }
+            else
+            {
+                addStudentHover = false;
+                addStudentDwellStart = DateTime.MinValue;
+                if (!isHovered)
+                {
+                    // Cursor left → re-arm for the next dwell.
+                    addStudentDwellArmed = true;
+                }
+            }
+
+            // Tile background (muted so it doesn't compete with real students)
+            using (var bg = new SolidBrush(Color.FromArgb(36, 40, 50)))
+                g.FillRectangle(bg, addStudentTileRect);
+
+            // Dwell progress fill rising from the bottom (matches student tiles)
+            if (addStudentHover && addStudentDwellStart != DateTime.MinValue)
+            {
+                double progress = Math.Min(1.0,
+                    (DateTime.Now - addStudentDwellStart).TotalSeconds / DWELL_SECONDS);
+                int fillH = (int)(TILE_H * progress);
+                var fillRect = new Rectangle(x, y + TILE_H - fillH, TILE_W, fillH);
+                using (var br = new SolidBrush(Color.FromArgb(80, 80, 220, 120)))
+                    g.FillRectangle(br, fillRect);
+
+                if (progress >= 1.0 && !enrollmentInProgress)
+                    StartEnrollment();
+            }
+
+            // Dashed border to communicate "this is a slot, not a student"
+            Color borderCol = isHovered ? Color.Cyan : Color.FromArgb(90, 110, 130);
+            int   borderW   = isHovered ? 3 : 2;
+            using (var pen = new Pen(borderCol, borderW))
+            {
+                pen.DashStyle = DashStyle.Dash;
+                pen.DashPattern = new float[] { 4f, 4f };
+                g.DrawRectangle(pen, addStudentTileRect);
+            }
+
+            // Plus glyph + label
+            using (var plusFont = new Font("Segoe UI", 48F, FontStyle.Bold))
+            {
+                var size = g.MeasureString("+", plusFont);
+                var pt   = new PointF(x + (TILE_W - size.Width) / 2f,
+                                      y + (TILE_H - size.Height) / 2f - 16f);
+                using (var fg = new SolidBrush(Color.FromArgb(200, 220, 235)))
+                    g.DrawString("+", plusFont, fg, pt);
+            }
+            using (var lblFont = new Font("Segoe UI", 12F, FontStyle.Bold))
+            {
+                string label = enrollmentInProgress
+                    ? (string.IsNullOrEmpty(enrollmentStatusMessage)
+                        ? "Enrolling…"
+                        : enrollmentStatusMessage)
+                    : "Add Student";
+                var size = g.MeasureString(label, lblFont);
+                var pt   = new PointF(x + (TILE_W - size.Width) / 2f,
+                                      y + TILE_H - size.Height - 14f);
+                using (var fg = new SolidBrush(Color.FromArgb(180, 200, 215)))
+                    g.DrawString(label, lblFont, fg, pt);
+            }
         }
 
         private void DrawDetailPanel(Graphics g)
@@ -694,6 +805,183 @@ namespace TuioDemoApp
             shuttingDown = true;
             try { tuioClient?.removeTuioListener(this); tuioClient?.disconnect(); } catch { }
             try { gestureClient?.RemoveListener(this); gestureClient?.Disconnect(); } catch { }
+        }
+
+        // ── Add-Student enrollment flow ───────────────────────────────────────
+        // The "+" tile in DrawAddStudentTile calls this on full dwell. We launch
+        // python/enroll_face.py out-of-process so the dashboard stays responsive,
+        // then on success append a User to UserManager and refresh the grid.
+        private void StartEnrollment()
+        {
+            if (enrollmentInProgress) return;
+            enrollmentInProgress = true;
+            addStudentHover = false;
+            addStudentDwellStart = DateTime.MinValue;
+            addStudentDwellArmed = false;   // require cursor to leave tile before next dwell
+            enrollmentStatusMessage = "Starting camera…";
+            ShowBanner("Stand in front of the camera — hold steady");
+
+            string scriptPath = LocateEnrollmentScript();
+            if (string.IsNullOrEmpty(scriptPath) || !File.Exists(scriptPath))
+            {
+                enrollmentInProgress = false;
+                enrollmentStatusMessage = "";
+                ShowBanner("Enrollment helper not found (python/enroll_face.py)");
+                return;
+            }
+
+            Task.Run(() =>
+            {
+                string stdout = "";
+                string stderr = "";
+                int exitCode = -1;
+                try
+                {
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName  = "python",
+                        Arguments = "\"" + scriptPath + "\"",
+                        WorkingDirectory = Path.GetDirectoryName(scriptPath) ?? "",
+                        UseShellExecute = false,
+                        CreateNoWindow  = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError  = true,
+                    };
+                    using (var p = Process.Start(psi))
+                    {
+                        stdout = p.StandardOutput.ReadToEnd();
+                        stderr = p.StandardError.ReadToEnd();
+                        p.WaitForExit();
+                        exitCode = p.ExitCode;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    stderr = "Process.Start threw: " + ex.Message;
+                    Console.WriteLine("[Dashboard] enroll_face launch failed: " + ex.Message);
+                }
+
+                // Log everything to the C# console so failures aren't silent.
+                Console.WriteLine($"[Dashboard] enroll_face exit={exitCode}");
+                if (!string.IsNullOrWhiteSpace(stdout))
+                    Console.WriteLine("[Dashboard] enroll_face stdout: " + stdout.Trim());
+                if (!string.IsNullOrWhiteSpace(stderr))
+                    Console.WriteLine("[Dashboard] enroll_face stderr: " + stderr.Trim());
+
+                // Marshal back to the UI thread to mutate state + repaint.
+                if (IsHandleCreated && !IsDisposed)
+                {
+                    BeginInvoke((MethodInvoker)(() => FinishEnrollment(exitCode, stdout, stderr)));
+                }
+                else
+                {
+                    enrollmentInProgress = false;
+                }
+            });
+        }
+
+        /// <summary>
+        /// Try a couple of likely locations for python/enroll_face.py. The
+        /// dashboard runs from bin\Debug\; the script lives two levels up.
+        /// </summary>
+        private string LocateEnrollmentScript()
+        {
+            var candidates = new[]
+            {
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "python", "enroll_face.py"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "python", "enroll_face.py"),
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "python", "enroll_face.py"),
+                Path.Combine(Directory.GetCurrentDirectory(), "python", "enroll_face.py"),
+            };
+            foreach (var c in candidates)
+            {
+                try
+                {
+                    string full = Path.GetFullPath(c);
+                    if (File.Exists(full)) return full;
+                }
+                catch { /* ignore malformed paths */ }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Called on the UI thread when the python helper exits. Parses the
+        /// "ENROLLED:<file>:<name>" handshake, creates the User record, and
+        /// re-loads the dashboard so the new tile pops in.
+        /// </summary>
+        private void FinishEnrollment(int exitCode, string stdout, string stderr)
+        {
+            enrollmentInProgress = false;
+
+            if (exitCode == 0 && !string.IsNullOrEmpty(stdout))
+            {
+                string fileName = null;
+                string displayName = null;
+                foreach (var rawLine in stdout.Split('\n'))
+                {
+                    var line = rawLine.Trim();
+                    if (!line.StartsWith("ENROLLED:")) continue;
+                    var parts = line.Substring("ENROLLED:".Length).Split(new[] { ':' }, 2);
+                    if (parts.Length >= 1) fileName    = parts[0];
+                    if (parts.Length >= 2) displayName = parts[1];
+                    break;
+                }
+
+                if (!string.IsNullOrEmpty(fileName))
+                {
+                    string slug = displayName != null
+                        ? displayName.ToLowerInvariant().Replace(' ', '-')
+                        : Path.GetFileNameWithoutExtension(fileName).ToLowerInvariant();
+                    string faceId = "student:" + slug;
+                    if (UserManager.GetByFaceId(faceId) == null)
+                    {
+                        UserManager.CreateUser(faceId, "child", displayName);
+                    }
+                    students = UserManager.GetAllUsers();
+                    enrollmentStatusMessage = "";
+                    ShowBanner(string.IsNullOrEmpty(displayName)
+                        ? "New student enrolled"
+                        : $"Welcome, {displayName}!");
+                    Invalidate();
+                    return;
+                }
+            }
+
+            // Surface the first non-empty line of stderr (if any) for the
+            // banner. Python's default exit code for an uncaught exception is
+            // 1, the same code we use for "user cancelled" — so don't trust
+            // exit 1 alone; if stderr looks like a traceback we treat it as a
+            // crash instead.
+            enrollmentStatusMessage = "";
+            string detail = "";
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                foreach (var line in stderr.Split('\n'))
+                {
+                    var t = line.Trim();
+                    if (t.Length == 0) continue;
+                    detail = t.Length > 80 ? t.Substring(0, 80) + "…" : t;
+                    break;
+                }
+            }
+
+            bool looksLikeCrash = !string.IsNullOrEmpty(stderr) &&
+                                  (stderr.Contains("Traceback") ||
+                                   stderr.Contains("Error") ||
+                                   stderr.Contains("Exception"));
+
+            if (exitCode == 1 && !looksLikeCrash)
+            {
+                ShowBanner("Enrollment cancelled");
+            }
+            else
+            {
+                ShowBanner(string.IsNullOrEmpty(detail)
+                    ? "Enrollment failed (see console)"
+                    : "Enrollment failed: " + detail);
+            }
+            Invalidate();
         }
 
         // ── Close-button dwell helpers (mirrors TuioDemo) ─────────────────────

@@ -91,6 +91,13 @@ GESTURE_TO_RADIAL = {
     "rectangle": "open_hand",
 }
 
+# Unified $1 confidence threshold used by every gesture source (hand, laser,
+# object). Hand previously used 0.12 while laser/object used 0.4 — the high
+# bar made it nearly impossible to fire from noisy strokes. With a shared
+# cooldown (gesture_cooldown=1.0s) duplicates are already debounced, so we
+# lower the bar for all sources.
+GESTURE_MIN_CONFIDENCE = 0.12
+
 
 def get_model_path(filename):
     """Find model in python/, project root. Download if missing."""
@@ -427,7 +434,7 @@ class GestureServer:
             if self._debug:
                 status = "MATCH" if score > 0.12 else "low"
                 print(f"[Server] try_recognize: {len(points)} pts -> {name}={score:.3f} ({status})", flush=True)
-            if name and score > 0.12:
+            if name and score > GESTURE_MIN_CONFIDENCE:
                 self.last_gesture_time = time.time()
                 self.gesture_points.clear()
                 out_name = GESTURE_TO_RADIAL.get(name.lower(), name) if self._use_radial_mapping else name
@@ -654,14 +661,17 @@ class GestureServer:
                                     
                                     if self.object_tracker.ready_for_recognition(tid) and self.recognizer:
                                         stroke = self.object_tracker.get_stroke(tid)
-                                        if len(stroke) >= 5:
+                                        if (len(stroke) >= 5
+                                                and time.time() - self.last_gesture_time >= self.gesture_cooldown):
                                             from dollarpy import Point
                                             pts = [Point(p[0], p[1], 1) for p in stroke]
-                                            res = self.recognizer.recognize(pts)
-                                            if res and res[0] and res[1] > 0.4:
-                                                name = GESTURE_TO_RADIAL.get(res[0].name, res[0].name) if self._use_radial_mapping else res[0].name
-                                                msg["gesture"] = {"source": "object", "name": name, "confidence": round(res[1], 3), "track_id": tid}
-                                                print(f"[Server] Object Gesture Matched: {res[0].name} (score={res[1]:.2f})", flush=True)
+                                            # dollarpy.Recognizer.recognize() returns (name_str, score).
+                                            tpl_name, score = self.recognizer.recognize(pts)
+                                            if tpl_name and score > GESTURE_MIN_CONFIDENCE:
+                                                name = GESTURE_TO_RADIAL.get(tpl_name.lower(), tpl_name) if self._use_radial_mapping else tpl_name
+                                                msg["gesture"] = {"source": "object", "name": name, "confidence": round(score, 3), "track_id": tid}
+                                                self.last_gesture_time = time.time()
+                                                print(f"[Server] Gesture fired source=object template={tpl_name} -> {name} score={score:.2f}", flush=True)
                                         self.object_tracker.mark_recognized(tid)
                         else:
                             # SORT unavailable — fall back to raw detections (no IDs)
@@ -746,19 +756,25 @@ class GestureServer:
                         # Draw preview
                         cv2.circle(display_frame, (int(cx*w), int(cy*h)), 5, (0, 0, 255), -1)
                         
-                        if self.laser_tracker.is_dwell():
+                        if (self.laser_tracker.is_dwell()
+                                and time.time() - self.last_gesture_time >= self.gesture_cooldown):
                             msg["gesture"] = {"source": "laser", "name": "tap", "confidence": 1.0, "x": cx, "y": cy}
+                            self.last_gesture_time = time.time()
+                            print(f"[Server] Gesture fired source=laser template=dwell -> tap", flush=True)
                             self.laser_tracker.clear()
                         elif self.laser_tracker.ready_for_recognition() and self.recognizer:
                             stroke = self.laser_tracker.get_stroke()
-                            if len(stroke) >= 5:
+                            if (len(stroke) >= 5
+                                    and time.time() - self.last_gesture_time >= self.gesture_cooldown):
                                 from dollarpy import Point
                                 pts = [Point(p[0], p[1], 1) for p in stroke]
-                                res = self.recognizer.recognize(pts)
-                                if res and res[0] and res[1] > 0.4:
-                                    name = GESTURE_TO_RADIAL.get(res[0].name, res[0].name) if self._use_radial_mapping else res[0].name
-                                    msg["gesture"] = {"source": "laser", "name": name, "confidence": round(res[1], 3)}
-                                    print(f"[Server] Laser Gesture Matched: {res[0].name} (score={res[1]:.2f})", flush=True)
+                                # dollarpy.Recognizer.recognize() returns (name_str, score).
+                                tpl_name, score = self.recognizer.recognize(pts)
+                                if tpl_name and score > GESTURE_MIN_CONFIDENCE:
+                                    name = GESTURE_TO_RADIAL.get(tpl_name.lower(), tpl_name) if self._use_radial_mapping else tpl_name
+                                    msg["gesture"] = {"source": "laser", "name": name, "confidence": round(score, 3)}
+                                    self.last_gesture_time = time.time()
+                                    print(f"[Server] Gesture fired source=laser template={tpl_name} -> {name} score={score:.2f}", flush=True)
                             self.laser_tracker.clear()
 
                 status = "Tracking" if msg["skeleton"] else "Move into frame..."

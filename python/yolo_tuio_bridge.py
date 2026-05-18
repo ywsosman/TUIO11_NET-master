@@ -41,6 +41,31 @@ FRUIT_CLASS_IDS = {
     "mango": 4, "orange": 5, "kiwi": 6,
 }
 
+# Fruits whose silhouette is elongated enough that we can read orientation
+# from the bounding-box aspect ratio. For round fruits (apple/orange/kiwi)
+# rotation is undefined from an axis-aligned bbox, so we always report 0.
+ELONGATED_FRUIT_CIDS = {1, 2, 3, 4}   # banana, strawberry, watermelon, mango
+# Bbox is considered "rotated 90°" when its height exceeds its width by this
+# ratio. 1.3 is forgiving enough for hand-held framing yet still clearly
+# separates a horizontal banana (h/w ≈ 0.4) from a vertical one (h/w ≈ 2.5).
+ROTATED_ASPECT_RATIO = 1.3
+
+
+def estimate_angle(cid, x1, y1, x2, y2):
+    """Approximate the TUIO 'angle' field from a YOLO bbox.
+
+    YOLO boxes are axis-aligned so true rotation is unknowable, but for
+    elongated fruits we can tell horizontal from vertical by aspect ratio.
+    Returns 0 for "upright" or math.pi/2 for "rotated 90°"; TuioDemo's
+    isRotated90 check is `abs(cos(angle)) < 0.707`, so these two values
+    map cleanly to false/true respectively.
+    """
+    if cid not in ELONGATED_FRUIT_CIDS:
+        return 0.0
+    w = max(1e-6, x2 - x1)
+    h = max(1e-6, y2 - y1)
+    return math.pi / 2.0 if (h / w) >= ROTATED_ASPECT_RATIO else 0.0
+
 
 def build_bundle(frame_id, tracked):
     """Build one TUIO 1.1 bundle: source -> alive -> set... -> fseq."""
@@ -107,12 +132,14 @@ class FruitTracker:
             cx = (x1 + x2) / 2.0 / w
             cy = (y1 + y2) / 2.0 / h
 
+            angle = estimate_angle(cid, x1, y1, x2, y2)
+
             if best_sid is None:
                 sid = self.next_sid
                 self.next_sid += 1
                 self.tracks[sid] = {
                     "sid": sid, "cid": cid, "bbox": (x1, y1, x2, y2),
-                    "x": cx, "y": cy, "angle": 0.0,
+                    "x": cx, "y": cy, "angle": angle,
                     "vx": 0.0, "vy": 0.0, "va": 0.0,
                     "ma": 0.0, "ra": 0.0,
                     "matched": True, "missed": 0,
@@ -121,9 +148,12 @@ class FruitTracker:
                 tr = self.tracks[best_sid]
                 vx = (cx - tr["x"]) / dt if dt > 0 else 0.0
                 vy = (cy - tr["y"]) / dt if dt > 0 else 0.0
+                va = (angle - tr["angle"]) / dt if dt > 0 else 0.0
                 tr["bbox"] = (x1, y1, x2, y2)
                 tr["x"], tr["y"] = cx, cy
+                tr["angle"] = angle
                 tr["vx"], tr["vy"] = vx, vy
+                tr["va"] = va
                 tr["ma"] = math.hypot(vx, vy)
                 tr["matched"] = True
                 tr["missed"] = 0
