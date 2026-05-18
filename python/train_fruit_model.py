@@ -22,8 +22,8 @@ BEST_PT_DST   = os.path.join(_PROJECT_ROOT, "fruit_best.pt")
 
 
 def _write_resolved_yaml():
-    """Rewrite the dataset YAML with an absolute `path:` so Ultralytics
-    doesn't resolve `path: .` against CWD instead of the YAML's directory."""
+    """Rewrite the dataset YAML with an absolute path so Ultralytics resolves
+    images/ relative to the dataset directory, not CWD."""
     import yaml
     with open(DATA_YAML, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)

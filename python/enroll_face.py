@@ -1,24 +1,9 @@
 """
-enroll_face.py — capture a new face and add it to the people/ enrolment.
+enroll_face.py — capture a new face and append it to python/people/.
 
-Launched on demand by the teacher dashboard's "+" (Add Student) tile.
-Opens the webcam, shows a live preview, and once a face stays still in
-view for a few frames, saves a cropped snapshot to:
-
-    python/people/Student_NN.jpg
-
-and appends a row to python/people/roles.tsv as a student.
-
-Detection backend: mediapipe Tasks API + face_landmarker.task. The legacy
-mp.solutions.* shim was dropped in mediapipe ≥ 0.10, so we use the modern
-detector with the same face_landmarker.task that gesture_server already
-downloads to the project root. From the 478 landmarks we derive a simple
-bounding box for the snapshot crop. No face_recognition / deepface deps.
-
-Exit codes / stdout contract for the C# launcher:
-    0   success    → prints one line "ENROLLED:<filename>:<display_name>"
-    1   cancelled  → user pressed Q / closed window
-    2   error      → mediapipe / camera dependency unavailable
+Launched by the teacher dashboard's Add Student tile. On success, prints
+one line `ENROLLED:<filename>:<display_name>` and exits 0. Cancel = 1,
+setup error = 2.
 """
 
 import math
@@ -35,29 +20,19 @@ _PROJECT_DIR = _SCRIPT_DIR.parent
 _PEOPLE_DIR  = _SCRIPT_DIR / "people"
 _ROLES_PATH  = _PEOPLE_DIR / "roles.tsv"
 
-# Reuse the model gesture_server already downloads — same Tasks API, no
-# extra file management. URL is the official mediapipe-models bucket so
-# we can also auto-download if the user wiped the project root.
 _FACE_MODEL_NAME = "face_landmarker.task"
 _FACE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/"
     "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
 
-# A face must stay still — bbox-center motion under this fraction of the
-# frame between two ticks counts as "stationary".
 _MAX_MOTION_NORMALISED = 0.03
-# Consecutive stable frames before we commit the snapshot. ~0.7s at 30fps,
-# longer than the login flow on purpose so the teacher has time to abort
-# if they realise they're enrolling the wrong person.
 _REQUIRED_STABLE = 20
 
 _WINDOW_TITLE = "Enroll new student - Q to cancel"
 
 
 def _resolve_face_model() -> str:
-    """Find face_landmarker.task next to gesture_server's other models, or
-    download it on first run."""
     for base in (_PROJECT_DIR, _SCRIPT_DIR):
         p = base / _FACE_MODEL_NAME
         if p.is_file():
@@ -81,8 +56,6 @@ def _next_student_number() -> int:
 
 
 def _open_camera():
-    """MSMF first so Win11 multi-app camera sharing works while other Python
-    processes (gesture_server, yolo_tuio_bridge) hold the same device."""
     if sys.platform == "win32":
         backends = [
             (cv2.CAP_MSMF, "MSMF"),
@@ -124,9 +97,6 @@ def main() -> int:
         print("Could not open webcam (camera 0)", file=sys.stderr)
         return 2
 
-    # FaceLandmarker gives us 478 landmarks per face. We don't care about the
-    # landmarks themselves — we just take their min/max to compute a bbox for
-    # the snapshot crop. One face is enough; pick the first detection.
     options = vision.FaceLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=model_path),
         running_mode=vision.RunningMode.IMAGE,
@@ -158,7 +128,6 @@ def main() -> int:
             h, w = frame.shape[:2]
 
             if result.face_landmarks:
-                # Single-face mode (num_faces=1) — first entry is the face.
                 lms = result.face_landmarks[0]
                 xs = [lm.x for lm in lms]
                 ys = [lm.y for lm in lms]
@@ -185,7 +154,7 @@ def main() -> int:
                     motion = math.hypot(dx, dy)
                     stable_now = motion < _MAX_MOTION_NORMALISED
                 else:
-                    stable_now = True   # first sighting after no-face
+                    stable_now = True
                 last_center = picked_center
             else:
                 last_center = None
@@ -195,7 +164,6 @@ def main() -> int:
             else:
                 stable_count = 0
 
-            # ── Preview overlay ──────────────────────────────────────────
             if latest_box_px is not None:
                 x0, y0, x1, y1 = latest_box_px
                 colour = (0, 255, 0) if stable_count > 0 else (0, 165, 255)
@@ -217,12 +185,10 @@ def main() -> int:
 
             cv2.imshow(_WINDOW_TITLE, frame)
 
-            # ── Commit when stability target reached ─────────────────────
             if (stable_count >= _REQUIRED_STABLE
                     and latest_box_px is not None
                     and latest_frame_for_save is not None):
                 x0, y0, x1, y1 = latest_box_px
-                # ~33% margin so we keep some hair / chin context.
                 mh = max(8, (y1 - y0) // 3)
                 mw = max(8, (x1 - x0) // 3)
                 cy0 = max(0, y0 - mh)
@@ -232,7 +198,6 @@ def main() -> int:
                 crop = latest_frame_for_save[cy0:cy1, cx0:cx1]
                 cv2.imwrite(str(out_path), crop)
 
-                # Append to roles.tsv (create with a trailing newline if missing).
                 needs_leading_nl = (
                     _ROLES_PATH.exists()
                     and _ROLES_PATH.stat().st_size > 0
@@ -261,10 +226,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    # Wrap everything so an uncaught exception exits with 2 (real failure)
-    # instead of Python's default 1 (which the dashboard treats as "user
-    # cancelled"). Also dump the full traceback to stderr so the launcher
-    # can surface the first line in the UI banner.
     import traceback
     try:
         sys.exit(main())

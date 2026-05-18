@@ -67,28 +67,17 @@ namespace TuioDemoApp
         private User       deleteArmedTarget = null;
         private const double DELETE_WINDOW_SECONDS = 5.0;
 
-        // ── Close-button dwell (mirrors TuioDemo) ────────────────────────────
-        // Hand/gaze cursor parks over the red X for CloseButtonGestureDwellMs
-        // to close the dashboard, no physical click needed.
         private Button   closeDashboardButton;
         private DateTime closeGestureHoverSince = DateTime.MinValue;
         private bool     shuttingDown;
         private const int CloseButtonGestureDwellMs = 900;
         private const int CloseButtonGestureInflatePx = 22;
 
-        // ── Add-Student tile (the missing C in CRUD) ─────────────────────────
-        // Mouse-and-keyboard-free Create flow: an extra "+" tile lives at the
-        // end of the student grid. Dwelling on it launches python/enroll_face.py,
-        // which uses the webcam to capture a new face → people/ + roles.tsv,
-        // then we reload UserManager and the new student appears in the grid.
         private Rectangle addStudentTileRect = Rectangle.Empty;
         private bool      addStudentHover;
         private DateTime  addStudentDwellStart = DateTime.MinValue;
         private bool      enrollmentInProgress;
         private string    enrollmentStatusMessage = "";
-        // After an enrollment ends, require the cursor to leave the "+" tile
-        // at least once before another dwell can re-arm. Otherwise a teacher
-        // who didn't move their hand would instantly retrigger the helper.
         private bool      addStudentDwellArmed = true;
 
         // ── Layout constants ──────────────────────────────────────────────────
@@ -139,7 +128,6 @@ namespace TuioDemoApp
             try { gestureClient.Connect(); }
             catch { Console.WriteLine("[Dashboard] GestureServer not running — hand cursor disabled."); }
 
-            // Red X button in top-right — dwell-to-close (same as TuioDemo).
             closeDashboardButton = new Button
             {
                 Text = "X",
@@ -325,15 +313,9 @@ namespace TuioDemoApp
             }
             hoveredStudent = newHoveredUser;
 
-            // ── "+" Add-Student tile (slotted in after the last child tile) ──
             DrawAddStudentTile(g, childIndex);
         }
 
-        /// <summary>
-        /// Renders the dashed "+" tile that creates a new student via the
-        /// enroll_face.py helper. Position mirrors the next free grid slot so
-        /// it visually feels like an empty card waiting to be filled.
-        /// </summary>
         private void DrawAddStudentTile(Graphics g, int nextChildIndex)
         {
             int col = nextChildIndex % 2;
@@ -346,8 +328,6 @@ namespace TuioDemoApp
                              cursorX >= x && cursorX <= x + TILE_W &&
                              cursorY >= y && cursorY <= y + TILE_H;
 
-            // Track dwell on this tile separately from the student tiles so
-            // hovering it doesn't mess with currentHoveredId/dwellStartTime.
             if (isHovered && addStudentDwellArmed)
             {
                 if (!addStudentHover)
@@ -360,18 +340,12 @@ namespace TuioDemoApp
             {
                 addStudentHover = false;
                 addStudentDwellStart = DateTime.MinValue;
-                if (!isHovered)
-                {
-                    // Cursor left → re-arm for the next dwell.
-                    addStudentDwellArmed = true;
-                }
+                if (!isHovered) addStudentDwellArmed = true;
             }
 
-            // Tile background (muted so it doesn't compete with real students)
             using (var bg = new SolidBrush(Color.FromArgb(36, 40, 50)))
                 g.FillRectangle(bg, addStudentTileRect);
 
-            // Dwell progress fill rising from the bottom (matches student tiles)
             if (addStudentHover && addStudentDwellStart != DateTime.MinValue)
             {
                 double progress = Math.Min(1.0,
@@ -385,7 +359,6 @@ namespace TuioDemoApp
                     StartEnrollment();
             }
 
-            // Dashed border to communicate "this is a slot, not a student"
             Color borderCol = isHovered ? Color.Cyan : Color.FromArgb(90, 110, 130);
             int   borderW   = isHovered ? 3 : 2;
             using (var pen = new Pen(borderCol, borderW))
@@ -395,7 +368,6 @@ namespace TuioDemoApp
                 g.DrawRectangle(pen, addStudentTileRect);
             }
 
-            // Plus glyph + label
             using (var plusFont = new Font("Segoe UI", 48F, FontStyle.Bold))
             {
                 var size = g.MeasureString("+", plusFont);
@@ -807,17 +779,13 @@ namespace TuioDemoApp
             try { gestureClient?.RemoveListener(this); gestureClient?.Disconnect(); } catch { }
         }
 
-        // ── Add-Student enrollment flow ───────────────────────────────────────
-        // The "+" tile in DrawAddStudentTile calls this on full dwell. We launch
-        // python/enroll_face.py out-of-process so the dashboard stays responsive,
-        // then on success append a User to UserManager and refresh the grid.
         private void StartEnrollment()
         {
             if (enrollmentInProgress) return;
             enrollmentInProgress = true;
             addStudentHover = false;
             addStudentDwellStart = DateTime.MinValue;
-            addStudentDwellArmed = false;   // require cursor to leave tile before next dwell
+            addStudentDwellArmed = false;
             enrollmentStatusMessage = "Starting camera…";
             ShowBanner("Stand in front of the camera — hold steady");
 
@@ -861,14 +829,12 @@ namespace TuioDemoApp
                     Console.WriteLine("[Dashboard] enroll_face launch failed: " + ex.Message);
                 }
 
-                // Log everything to the C# console so failures aren't silent.
                 Console.WriteLine($"[Dashboard] enroll_face exit={exitCode}");
                 if (!string.IsNullOrWhiteSpace(stdout))
                     Console.WriteLine("[Dashboard] enroll_face stdout: " + stdout.Trim());
                 if (!string.IsNullOrWhiteSpace(stderr))
                     Console.WriteLine("[Dashboard] enroll_face stderr: " + stderr.Trim());
 
-                // Marshal back to the UI thread to mutate state + repaint.
                 if (IsHandleCreated && !IsDisposed)
                 {
                     BeginInvoke((MethodInvoker)(() => FinishEnrollment(exitCode, stdout, stderr)));
@@ -880,10 +846,6 @@ namespace TuioDemoApp
             });
         }
 
-        /// <summary>
-        /// Try a couple of likely locations for python/enroll_face.py. The
-        /// dashboard runs from bin\Debug\; the script lives two levels up.
-        /// </summary>
         private string LocateEnrollmentScript()
         {
             var candidates = new[]
@@ -900,16 +862,11 @@ namespace TuioDemoApp
                     string full = Path.GetFullPath(c);
                     if (File.Exists(full)) return full;
                 }
-                catch { /* ignore malformed paths */ }
+                catch { }
             }
             return null;
         }
 
-        /// <summary>
-        /// Called on the UI thread when the python helper exits. Parses the
-        /// "ENROLLED:<file>:<name>" handshake, creates the User record, and
-        /// re-loads the dashboard so the new tile pops in.
-        /// </summary>
         private void FinishEnrollment(int exitCode, string stdout, string stderr)
         {
             enrollmentInProgress = false;
@@ -948,11 +905,6 @@ namespace TuioDemoApp
                 }
             }
 
-            // Surface the first non-empty line of stderr (if any) for the
-            // banner. Python's default exit code for an uncaught exception is
-            // 1, the same code we use for "user cancelled" — so don't trust
-            // exit 1 alone; if stderr looks like a traceback we treat it as a
-            // crash instead.
             enrollmentStatusMessage = "";
             string detail = "";
             if (!string.IsNullOrWhiteSpace(stderr))
@@ -984,7 +936,6 @@ namespace TuioDemoApp
             Invalidate();
         }
 
-        // ── Close-button dwell helpers (mirrors TuioDemo) ─────────────────────
         private void LayoutCloseButton()
         {
             if (closeDashboardButton == null || closeDashboardButton.IsDisposed) return;
@@ -1000,7 +951,6 @@ namespace TuioDemoApp
             if (closeDashboardButton == null || closeDashboardButton.IsDisposed || !closeDashboardButton.Visible)
                 return;
 
-            // No active cursor (no hand, no gaze) → reset.
             if (cursorX < 0 || cursorY < 0)
             {
                 if (closeGestureHoverSince != DateTime.MinValue) Invalidate();

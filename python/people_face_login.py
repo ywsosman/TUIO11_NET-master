@@ -51,27 +51,15 @@ def _emit_result(lines: List[str]) -> None:
         sys.stdout.flush()
 
 WINDOW_TITLE = "TUIO Face Login - Press Q"
-# Consecutive frames that must agree on the same identity before we commit.
-# Raised from 6 to 12 (~0.4s at 30 fps) so single-frame look-alikes can't
-# slip a teacher login through when the camera briefly latches onto the
-# wrong encoding.
-_CONFIRMS = 12
-# 80 % confidence requirement (was 70 %):
-#   face_recognition: distance ≤ 0.20  →  confidence = (1 - dist)*100 ≥ 80 %
-#   DeepFace cosine:  distance ≤ 0.20  →  confidence = (1 - dist)*100 ≥ 80 %
-# Real same-person matches consistently land at 85-95 %, so tightening to 80
-# kills almost all false-positive cross-matches without losing legit logins.
-_MIN_CONFIDENCE = 80.0
+_CONFIRMS = 12              # consecutive agreeing frames before commit (~0.4s @ 30fps)
+_MIN_CONFIDENCE = 80.0      # face_recognition / DeepFace: (1 - dist)*100
 _FR_TOLERANCE = 0.20
 _DF_TOLERANCE = 0.20
 
 # Speed knobs (face_recognition / live loop)
-_FR_RESIZE = 0.2  # smaller = faster dlib work (was 0.25 in face.ipynb)
-# Jitters re-sample the face N times when computing the encoding and average
-# the result. Going from 0 → 3 buys real noise robustness on the one
-# enrolment image per person we have today, at a modest speed cost.
-_FR_NUM_JITTERS = 3
-_FR_UPSAMPLE = 0  # face_locations upsampling passes (default 1)
+_FR_RESIZE = 0.2            # smaller = faster dlib work (was 0.25 in face.ipynb)
+_FR_NUM_JITTERS = 3         # encoding re-samples; higher = more robust, slower
+_FR_UPSAMPLE = 0            # face_locations upsampling passes (default 1)
 # Run face detect+encode on 1 of every N display frames; preview still updates every frame
 _FR_RECOGNIZE_EVERY_N = 2
 
