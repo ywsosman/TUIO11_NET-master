@@ -182,9 +182,7 @@ class GazeTracker:
         if transformation is None:
             return GazeResult(0.5, 0.5, 0, 0, head_yaw, head_pitch, 0.5, left_pupil, right_pupil, True)
         
-        # Compute the gaze ray independently for each eye, then average the
-        # screen-space results. Using both eyes removes the left-side bias and
-        # halves the iris-detection noise when both eyes are visible.
+        # Per-eye gaze ray; the two screen-space results are averaged below.
         def _eye_gaze_2d(pupil_px, eye_ball_center):
             pupil_world = transformation @ np.array([[pupil_px[0], pupil_px[1], 0, 1]]).T
             S_eye = eye_ball_center + (pupil_world - eye_ball_center) * 10

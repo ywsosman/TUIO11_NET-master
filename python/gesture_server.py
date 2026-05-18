@@ -91,11 +91,6 @@ GESTURE_TO_RADIAL = {
     "rectangle": "open_hand",
 }
 
-# Unified $1 confidence threshold used by every gesture source (hand, laser,
-# object). Hand previously used 0.12 while laser/object used 0.4 — the high
-# bar made it nearly impossible to fire from noisy strokes. With a shared
-# cooldown (gesture_cooldown=1.0s) duplicates are already debounced, so we
-# lower the bar for all sources.
 GESTURE_MIN_CONFIDENCE = 0.12
 
 
@@ -168,8 +163,6 @@ def open_gesture_camera(camera_id, width, height):
     Returns a configured cv2.VideoCapture or None.
     """
     if sys.platform == "win32":
-        # MSMF first: it supports Win11's multi-app camera sharing so the
-        # yolo_tuio_bridge can use the same physical camera concurrently.
         backends = [
             (cv2.CAP_MSMF, "MSMF"),
             (cv2.CAP_DSHOW, "DSHOW"),
@@ -665,7 +658,6 @@ class GestureServer:
                                                 and time.time() - self.last_gesture_time >= self.gesture_cooldown):
                                             from dollarpy import Point
                                             pts = [Point(p[0], p[1], 1) for p in stroke]
-                                            # dollarpy.Recognizer.recognize() returns (name_str, score).
                                             tpl_name, score = self.recognizer.recognize(pts)
                                             if tpl_name and score > GESTURE_MIN_CONFIDENCE:
                                                 name = GESTURE_TO_RADIAL.get(tpl_name.lower(), tpl_name) if self._use_radial_mapping else tpl_name
@@ -768,7 +760,6 @@ class GestureServer:
                                     and time.time() - self.last_gesture_time >= self.gesture_cooldown):
                                 from dollarpy import Point
                                 pts = [Point(p[0], p[1], 1) for p in stroke]
-                                # dollarpy.Recognizer.recognize() returns (name_str, score).
                                 tpl_name, score = self.recognizer.recognize(pts)
                                 if tpl_name and score > GESTURE_MIN_CONFIDENCE:
                                     name = GESTURE_TO_RADIAL.get(tpl_name.lower(), tpl_name) if self._use_radial_mapping else tpl_name

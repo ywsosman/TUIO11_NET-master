@@ -35,31 +35,18 @@ CONF_THRESH  = 0.45
 IOU_THRESH   = 0.45
 MAX_FPS      = 20
 
-# Match the order in fruit_dataset/fruit_data.yaml
+# Order must match fruit_dataset/fruit_data.yaml.
 FRUIT_CLASS_IDS = {
     "apple": 0, "banana": 1, "strawberry": 2, "watermelon": 3,
     "mango": 4, "orange": 5, "kiwi": 6,
 }
 
-# Fruits whose silhouette is elongated enough that we can read orientation
-# from the bounding-box aspect ratio. For round fruits (apple/orange/kiwi)
-# rotation is undefined from an axis-aligned bbox, so we always report 0.
-ELONGATED_FRUIT_CIDS = {1, 2, 3, 4}   # banana, strawberry, watermelon, mango
-# Bbox is considered "rotated 90°" when its height exceeds its width by this
-# ratio. 1.3 is forgiving enough for hand-held framing yet still clearly
-# separates a horizontal banana (h/w ≈ 0.4) from a vertical one (h/w ≈ 2.5).
+# Elongated cids — rotation is inferable from bbox aspect ratio.
+ELONGATED_FRUIT_CIDS = {1, 2, 3, 4}
 ROTATED_ASPECT_RATIO = 1.3
 
 
 def estimate_angle(cid, x1, y1, x2, y2):
-    """Approximate the TUIO 'angle' field from a YOLO bbox.
-
-    YOLO boxes are axis-aligned so true rotation is unknowable, but for
-    elongated fruits we can tell horizontal from vertical by aspect ratio.
-    Returns 0 for "upright" or math.pi/2 for "rotated 90°"; TuioDemo's
-    isRotated90 check is `abs(cos(angle)) < 0.707`, so these two values
-    map cleanly to false/true respectively.
-    """
     if cid not in ELONGATED_FRUIT_CIDS:
         return 0.0
     w = max(1e-6, x2 - x1)
@@ -194,9 +181,6 @@ def main():
     client = SimpleUDPClient(TUIO_HOST, TUIO_PORT)
     print(f"[TUIO] Sending /tuio/2Dobj to {TUIO_HOST}:{TUIO_PORT}")
 
-    # MSMF (Media Foundation) supports Win11's multi-app camera sharing,
-    # which lets gesture_server.py use the same physical camera at the same
-    # time. DSHOW would lock the device.
     cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_MSMF)
     if not cap.isOpened():
         print(f"[ERR] Cannot open camera {CAM_INDEX}")

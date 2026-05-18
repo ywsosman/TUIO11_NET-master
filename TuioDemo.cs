@@ -233,12 +233,6 @@ namespace TuioDemoApp
         // ── Apply adaptive hints derived from prior gaze + emotion sessions ──
         // Written by python/gaze_adapter.py + python/emotion_adapter.py at the
         // end of every session; consumed here on the next launch.
-        // ── Apply teacher-assigned difficulty as the gameplay baseline ──
-        // The teacher dashboard writes to UserManager (users.json); we read it
-        // back here so changes actually affect slot scaling, hint timing, and
-        // the silhouette display. Emotion can still nudge it easier mid-play
-        // (via ApplyDifficultyHint) — but never override teacher "easy" into
-        // "harder" without confirmation, which keeps the teacher's intent.
         ApplyTeacherDifficultyBaseline();
 
         adaptiveHints = AdaptiveHints.Load(this.userProfileKey);
@@ -366,7 +360,6 @@ namespace TuioDemoApp
         }
         if (g == "tap")
         {
-            // Laser dwell — activate the radial item currently under the cursor.
             if (radialMenuOpen)
             {
                 BeginInvoke((MethodInvoker)(() =>
@@ -635,13 +628,6 @@ namespace TuioDemoApp
     /// </summary>
     private void ApplyDifficultyHint(string hint)
     {
-        // Emotion-driven hint must respect the teacher baseline: a teacher who
-        // set "hard" should never get auto-promoted to "easier" by a frown.
-        // We only let emotion modulate within the bounds it logically can —
-        // currently that means it can express "easier" only when teacher
-        // chose easy or medium. (Frustration→"easier" matches the dashboard's
-        // intent; "harder" never comes from emotion in this codebase, so the
-        // ceiling isn't actually enforced today, just documented.)
         if (hint == currentDifficultyHint) return;
         currentDifficultyHint = hint;
         Console.WriteLine("[TuioDemo] Difficulty → " + hint);
@@ -649,18 +635,6 @@ namespace TuioDemoApp
             BeginInvoke((MethodInvoker)(() => Invalidate()));
     }
 
-    /// <summary>
-    /// Read the teacher-set difficulty for this user out of users.json (via
-    /// UserManager) and translate it into the gameplay hint scale used by
-    /// slot scaling, hint timing, and the silhouette overlay.
-    ///
-    ///   stored "easy"   → "easier"  (slot scaled 1.20x, silhouette shown)
-    ///   stored "medium" → "normal"  (slot unchanged)
-    ///   stored "hard"   → "harder"  (slot scaled 0.90x)
-    ///
-    /// Called once at construction so the game opens in the teacher's chosen
-    /// difficulty rather than always "normal".
-    /// </summary>
     private void ApplyTeacherDifficultyBaseline()
     {
         try
@@ -691,18 +665,9 @@ namespace TuioDemoApp
 
     private const float AdaptiveHintMinEmotionConfidence = 0.55f;
 
-    // Minimum confidence on the "happy" reading before we enable rotation
-    // mode for fruit placement. Anything below this is treated as neutral.
-    private const float ContentEmotionMinConfidence = 0.50f;
-    // Max age of an emotion sample before we treat it as stale (player looked
-    // away, server reconnecting, etc.) — same window as the adaptive-hint code.
-    private const double ContentEmotionMaxAgeSec = 14.0;
+    private const float  ContentEmotionMinConfidence = 0.50f;
+    private const double ContentEmotionMaxAgeSec     = 14.0;
 
-    /// <summary>
-    /// True when the emotion server's latest reading is a confident "happy".
-    /// Drives the rotated-fruit hard mode — when the player is enjoying it,
-    /// all slots flip to alt images and require a 90° rotation of the marker.
-    /// </summary>
     private bool IsPlayerContent()
     {
         if (string.IsNullOrEmpty(currentEmotionLabel)) return false;
@@ -735,7 +700,6 @@ namespace TuioDemoApp
     {
         if (slot == null) return "";
         string name = string.IsNullOrWhiteSpace(slot.ObjectName) ? "fruit" : slot.ObjectName;
-        // Rotation requirement is now driven by live emotion, not the cid.
         if (IsPlayerContent())
             return $"Stuck? Turn the {name} marker so it matches the rotated fruit on the board!";
         return $"Hold the {name} marker up to the camera — line it up with the {name} silhouette!";
@@ -781,9 +745,6 @@ namespace TuioDemoApp
             BoardImageName = "level 1.png"
         };
 
-        // All 7 fruits spread across 4 levels (2/2/2/1). NOTE: with the base
-        // yolo11n.pt fallback in use, only apple/banana/orange detect reliably;
-        // strawberry/watermelon/mango/kiwi need a properly trained fruit_best.pt.
         level1.Targets.Add(new TargetSlot { SymbolId = 0, ObjectName = "Apple",  XNormalized = 0.38f, YNormalized = 0.50f, WidthNormalized = 0.13f, HeightNormalized = 0.31f });
         level1.Targets.Add(new TargetSlot { SymbolId = 1, ObjectName = "Banana", XNormalized = 0.62f, YNormalized = 0.50f, WidthNormalized = 0.18f, HeightNormalized = 0.26f });
 
@@ -2430,10 +2391,6 @@ namespace TuioDemoApp
 
             if (!slot.IsPlaced)
             {
-                // Draw faded ghost image of the object. When the player is
-                // visibly enjoying the game (emotion = happy), show the
-                // rotated/cut alt asset for every fruit that has one — the
-                // board telegraphs that the slot wants a rotated marker.
                 Image objectImg = null;
                 if (IsPlayerContent() && objectImagesAlt.ContainsKey(slot.SymbolId))
                 {
@@ -2507,9 +2464,6 @@ namespace TuioDemoApp
         foreach (var slot in CurrentLevel.Targets)
         {
             if (!slot.IsPlaced) continue;
-            // Render the placed fruit using whichever asset matches the
-            // emotion-driven rotation mode. Falls back to the normal sprite
-            // when the alt isn't available.
             Image placedImage = null;
             if (IsPlayerContent() && objectImagesAlt.ContainsKey(slot.SymbolId))
             {
@@ -2609,10 +2563,6 @@ namespace TuioDemoApp
 
     private bool UseAlternateImageForSymbol(int symbolId, bool isRotated90)
     {
-        // Emotion-driven hard mode: when the player is visibly enjoying it,
-        // we show alt (rotated/cut) images for every fruit that has one.
-        // The on-screen art always reflects the current required orientation
-        // so the player can see what the slot is asking for.
         bool needRotated = IsPlayerContent();
         if (isRotated90 != needRotated) return false;
         return needRotated
@@ -2623,10 +2573,6 @@ namespace TuioDemoApp
 
     private bool IsValidPlacementState(int symbolId, bool isRotated90)
     {
-        // Placement validity follows the same live emotion probe so the rule
-        // matches what the player sees on the board: happy → must be rotated,
-        // otherwise → must be upright. Stale or low-confidence emotion falls
-        // back to the upright requirement.
         return isRotated90 == IsPlayerContent();
     }
 
@@ -2911,14 +2857,8 @@ public class KidPopup : Form, TuioListener
     private Label lblMessage;
     private Button btnOk;
     private TuioClient _client;
-    // Minimum visible time before any TUIO event can dismiss the popup.
-    // Without this, the bridge's IoU tracker drops a fruit's sid every ~1s
-    // and re-creates it, which fires addTuioObject and instantly closes the
-    // "Great job!" celebration the user came to see.
     private DateTime _shownAt;
     private static readonly TimeSpan _MinVisible = TimeSpan.FromSeconds(2.0);
-    // Backstop auto-close so the user isn't required to scan a marker — the
-    // popup will close itself after this window even if no event fires.
     private static readonly TimeSpan _AutoClose  = TimeSpan.FromSeconds(5.0);
 
     public KidPopup(TuioClient client, string title, string message)
@@ -2935,13 +2875,9 @@ public class KidPopup : Form, TuioListener
         this.BackColor = Color.White;
         this.DoubleBuffered = true;
 
-        // Auto-close after _AutoClose. Use the Shown event to start the timer
-        // so we don't begin counting before the form actually paints.
         this.Shown += (s, e) =>
         {
             _shownAt = DateTime.Now;
-            // Fully-qualified to disambiguate from System.Threading.Timer,
-            // which is also in scope via other usings in this file.
             var timer = new System.Windows.Forms.Timer { Interval = (int)_AutoClose.TotalMilliseconds };
             timer.Tick += (ts, te) =>
             {
@@ -3005,10 +2941,6 @@ public class KidPopup : Form, TuioListener
 
     public void addTuioObject(TuioObject tobj)
     {
-        // Ignore any TUIO event in the first _MinVisible seconds — the IoU
-        // tracker in yolo_tuio_bridge re-issues sids when fruits drift in/out
-        // of frame, so the very same fruit that finished the level would
-        // otherwise instantly dismiss the celebration popup.
         if (_shownAt == DateTime.MinValue || (DateTime.Now - _shownAt) < _MinVisible)
             return;
         if (this.IsHandleCreated && !this.IsDisposed)
