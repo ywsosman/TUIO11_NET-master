@@ -14,6 +14,11 @@ import json
 from pathlib import Path
 
 
+def _scalar(v) -> float:
+    """Convert numpy/OpenCV outputs to a Python float (avoids int()/float() on shape-(1,) arrays)."""
+    return float(np.asarray(v).reshape(-1)[0])
+
+
 class GazeAPI(Enum):
     LEGACY = "legacy"       # mp.solutions.face_mesh (old API)
     NEW = "new"             # mp.tasks.vision.FaceLandmarker (new API)
@@ -161,8 +166,8 @@ class GazeTracker:
         
         rmat, _ = cv2.Rodrigues(rotation_vector)
         angles, _, _, _, _, _ = cv2.RQDecomp3x3(rmat)
-        head_yaw = angles[1] if len(angles) > 1 else 0
-        head_pitch = angles[0] if len(angles) > 0 else 0
+        head_yaw = _scalar(angles[1]) if len(angles) > 1 else 0.0
+        head_pitch = _scalar(angles[0]) if len(angles) > 0 else 0.0
         
         image_points_3d = np.array([
             (int(image_points[i][0]), int(image_points[i][1]), 0)
@@ -184,27 +189,28 @@ class GazeTracker:
             pupil_world = transformation @ np.array([[pupil_px[0], pupil_px[1], 0, 1]]).T
             S_eye = eye_ball_center + (pupil_world - eye_ball_center) * 10
             eye_pupil2D, _ = cv2.projectPoints(
-                (int(S_eye[0]), int(S_eye[1]), int(S_eye[2])),
+                (int(_scalar(S_eye[0])), int(_scalar(S_eye[1])), int(_scalar(S_eye[2]))),
                 rotation_vector,
                 translation_vector,
                 camera_matrix,
                 dist_coeffs,
             )
             head_pose_eye, _ = cv2.projectPoints(
-                (int(pupil_world[0]), int(pupil_world[1]), 40),
+                (int(_scalar(pupil_world[0])), int(_scalar(pupil_world[1])), 40),
                 rotation_vector,
                 translation_vector,
                 camera_matrix,
                 dist_coeffs,
             )
-            return pupil_px + (eye_pupil2D[0][0] - pupil_px) - (head_pose_eye[0][0] - pupil_px)
+            gaze = np.asarray(pupil_px, dtype=float) + (eye_pupil2D[0][0] - pupil_px) - (head_pose_eye[0][0] - pupil_px)
+            return float(gaze[0]), float(gaze[1])
 
         gaze_L = _eye_gaze_2d(left_pupil,  self.eye_ball_center_left)
         gaze_R = _eye_gaze_2d(right_pupil, self.eye_ball_center_right)
-        gaze_2d = (np.asarray(gaze_L, dtype=float) + np.asarray(gaze_R, dtype=float)) / 2.0
+        gaze_2d = np.array([(gaze_L[0] + gaze_R[0]) / 2.0, (gaze_L[1] + gaze_R[1]) / 2.0])
         
-        norm_x = np.clip(gaze_2d[0] / w, 0, 1)
-        norm_y = np.clip(gaze_2d[1] / h, 0, 1)
+        norm_x = float(np.clip(gaze_2d[0] / w, 0, 1))
+        norm_y = float(np.clip(gaze_2d[1] / h, 0, 1))
         
         if self.is_calibrated and self.calibration_matrix is not None:
             norm_x, norm_y = self._apply_calibration(norm_x, norm_y)
@@ -216,16 +222,16 @@ class GazeTracker:
         
         dx = avg_iris_x - eye_center_x
         dy = avg_iris_y - eye_center_y
-        yaw = np.arctan2(dx, 100)
-        pitch = np.arctan2(dy, 100)
+        yaw = float(np.arctan2(dx, 100))
+        pitch = float(np.arctan2(dy, 100))
         
         return GazeResult(
             x=norm_x,
             y=norm_y,
             yaw=yaw,
             pitch=pitch,
-            head_yaw=head_yaw,
-            head_pitch=head_pitch,
+            head_yaw=float(head_yaw),
+            head_pitch=float(head_pitch),
             confidence=0.85,
             left_pupil=left_pupil,
             right_pupil=right_pupil,
@@ -235,7 +241,7 @@ class GazeTracker:
     def _apply_calibration(self, x, y) -> Tuple[float, float]:
         x_mapped = self.calibration_matrix[0][0] * x + self.calibration_matrix[0][1] * y + self.calibration_matrix[0][2]
         y_mapped = self.calibration_matrix[1][0] * x + self.calibration_matrix[1][1] * y + self.calibration_matrix[1][2]
-        return np.clip(x_mapped, 0, 1), np.clip(y_mapped, 0, 1)
+        return float(np.clip(x_mapped, 0, 1)), float(np.clip(y_mapped, 0, 1))
     
     def add_calibration_sample(self, screen_x: float, screen_y: float, gaze_x: float, gaze_y: float):
         self.calibration_data.append(CalibrationPoint(screen_x, screen_y, gaze_x, gaze_y, True))
